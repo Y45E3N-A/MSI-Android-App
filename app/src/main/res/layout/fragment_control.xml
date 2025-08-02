@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/root_container"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical">
+
+    <!-- Controls Section (top half) -->
+    <ScrollView
+        android:id="@+id/controls_scrollview"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true">
+
+        <LinearLayout
+            android:id="@+id/controls_container"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical"
+            android:padding="16dp"
+            android:gravity="center_horizontal">
+
+            <!-- Your control widgets -->
+            <Button
+                android:id="@+id/button_shutdown"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Shutdown"/>
+
+            <EditText
+                android:id="@+id/ipAddressInput"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:hint="Enter Pi IP Address"
+                android:inputType="text"
+                android:layout_marginBottom="12dp" />
+
+            <Button
+                android:id="@+id/setIpButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Set IP Address"
+                android:layout_marginBottom="8dp" />
+
+
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="24dp">
+
+                <View
+                    android:id="@+id/piConnectionDot"
+                    android:layout_width="16dp"
+                    android:layout_height="16dp"
+                    android:background="@drawable/circle_green"
+                    android:layout_marginEnd="8dp"/>
+                <TextView
+                    android:id="@+id/piConnectionStatus"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Status: Unknown"
+                    android:textSize="16sp"/>
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/lastPiButtonText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="Pi Button Pressed: --"
+                android:textSize="18sp"
+                android:layout_marginBottom="24dp" />
+
+            <Button
+                android:id="@+id/button1"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Start Capture"
+                android:layout_marginBottom="12dp" />
+
+            <Switch
+                android:id="@+id/switch_led_warming"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="LED Warming"
+                android:textOn="LED Warming ON"
+                android:textOff="LED Warming OFF"
+                android:layout_marginBottom="12dp" />
+
+            <Switch
+                android:id="@+id/switch_camera_preview"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Camera Preview"
+                android:textOn="Camera Preview ON"
+                android:textOff="Camera Preview OFF"
+                android:layout_marginBottom="12dp" />
+
+            <ProgressBar
+                android:id="@+id/captureProgressBar"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:visibility="gone"
+                android:max="16"/>
+
+            <TextView
+                android:id="@+id/captureProgressText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:visibility="gone"/>
+
+        </LinearLayout>
+    </ScrollView>
+
+    <!-- Preview Section (bottom half), scrollable and padded for bottom nav -->
+    <ScrollView
+        android:id="@+id/preview_scrollview"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:fillViewport="true"
+        android:paddingBottom="72dp"
+        android:clipToPadding="false"
+        android:visibility="gone">
+
+        <FrameLayout
+            android:id="@+id/preview_container"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:background="@android:color/black"/>
+    </ScrollView>
+</LinearLayout>
