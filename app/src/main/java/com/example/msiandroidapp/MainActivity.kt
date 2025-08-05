@@ -8,10 +8,11 @@ import android.os.Bundle
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
-import androidx.navigation.fragment.NavHostFragment
-import androidx.navigation.ui.setupWithNavController
+import androidx.viewpager2.widget.ViewPager2
 import com.example.msiandroidapp.databinding.ActivityMainBinding
 import com.example.msiandroidapp.service.UploadForegroundService
+import com.example.msiandroidapp.ui.ViewPagerAdapter
+import com.google.android.material.bottomnavigation.BottomNavigationView
 
 class MainActivity : AppCompatActivity() {
 
@@ -27,18 +28,38 @@ class MainActivity : AppCompatActivity() {
         binding = ActivityMainBinding.inflate(layoutInflater)
         setContentView(binding.root)
 
-        // Set up Navigation Controller
-        val navHostFragment = supportFragmentManager
-            .findFragmentById(R.id.nav_host_fragment_activity_main) as? NavHostFragment
-        val navController = navHostFragment?.navController
-        if (navController != null) {
-            binding.navView.setupWithNavController(navController)
+        val viewPager = binding.viewPager
+        val bottomNav = binding.navView
+
+        // --- Setup ViewPager2 adapter ---
+        viewPager.adapter = ViewPagerAdapter(this)
+        viewPager.offscreenPageLimit = 2 // Keep both fragments alive
+
+        // --- Sync: Tab click → Change ViewPager page ---
+        bottomNav.setOnItemSelectedListener { item ->
+            when (item.itemId) {
+                R.id.navigation_control -> viewPager.currentItem = 0
+                R.id.navigation_gallery -> viewPager.currentItem = 1
+            }
+            true
         }
 
-        // Ask for location permission if needed
+        // --- Sync: Swipe → Update selected tab ---
+        viewPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
+            override fun onPageSelected(position: Int) {
+                super.onPageSelected(position)
+                bottomNav.selectedItemId = when (position) {
+                    0 -> R.id.navigation_control
+                    1 -> R.id.navigation_gallery
+                    else -> R.id.navigation_control
+                }
+            }
+        })
+
+        // --- Check location permission ---
         checkLocationPermission()
 
-        // Start UploadForegroundService (safe to call repeatedly, Android will handle)
+        // --- Start UploadForegroundService ---
         startUploadService()
     }
 
@@ -51,14 +72,12 @@ class MainActivity : AppCompatActivity() {
         ) == PackageManager.PERMISSION_GRANTED
 
         if (!fineGranted && !coarseGranted) {
-            // Optional: show rationale if needed
-            if (ActivityCompat.shouldShowRequestPermissionRationale(this, Manifest.permission.ACCESS_FINE_LOCATION)) {
-                // Show a rationale to explain why location is needed (if user previously denied)
-                // For example: show a dialog, then request permission
-            }
             ActivityCompat.requestPermissions(
                 this,
-                arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+                arrayOf(
+                    Manifest.permission.ACCESS_FINE_LOCATION,
+                    Manifest.permission.ACCESS_COARSE_LOCATION
+                ),
                 LOCATION_PERMISSION_REQUEST_CODE
             )
         }
@@ -72,9 +91,9 @@ class MainActivity : AppCompatActivity() {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == LOCATION_PERMISSION_REQUEST_CODE) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                // Permission granted: location features can be used
+                // Location permission granted
             } else {
-                // Permission denied: show rationale or disable location-based features
+                // Location permission denied
             }
         }
     }

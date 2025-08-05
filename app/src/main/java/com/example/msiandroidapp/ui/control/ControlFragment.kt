@@ -36,7 +36,9 @@ import kotlinx.coroutines.tasks.await
 import java.text.SimpleDateFormat
 import java.util.Date
 import android.content.Context
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 @SuppressLint("MissingPermission")
 suspend fun getLastKnownLocationString(context: Context): String {
@@ -541,6 +543,8 @@ class ControlFragment : Fragment() {
             val context = requireContext().applicationContext
             val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(Date())
             val imagePaths = mutableListOf<String>()
+
+            // Save bitmaps to internal storage
             bitmaps.forEachIndexed { idx, bmp ->
                 if (bmp != null) {
                     val filename = "session_${System.currentTimeMillis()}_img_$idx.jpg"
@@ -550,35 +554,43 @@ class ControlFragment : Fragment() {
                 }
             }
 
+            // Get location
             val location = getLastKnownLocationString(context)
 
+            // Build session object
             val session = Session(
                 timestamp = timestamp,
                 location = location,
                 imagePaths = imagePaths
             )
+
+            // Insert into Room
             AppDatabase.getDatabase(context).sessionDao().insert(session)
 
-            requireActivity().runOnUiThread {
+            // Immediately update UI (on main thread)
+            withContext(Dispatchers.Main) {
                 binding.captureProgressText.text = "All images received!"
                 binding.captureProgressBar.visibility = View.VISIBLE
                 binding.captureProgressText.visibility = View.VISIBLE
             }
+
             delay(2000)
-            requireActivity().runOnUiThread {
-                val binding = _binding ?: return@runOnUiThread
+
+            withContext(Dispatchers.Main) {
                 binding.captureProgressBar.visibility = View.GONE
                 binding.captureProgressText.visibility = View.GONE
                 clearPreview()
                 isCaptureOngoing = false
                 setUiBusy(false)
+
+                // Reset view model state
                 controlViewModel.isCapturing.value = false
                 controlViewModel.imageCount.value = 0
                 controlViewModel.capturedBitmaps.value = MutableList(16) { null }
             }
-
         }
     }
+
 
     override fun onResume() {
         super.onResume()

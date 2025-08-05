@@ -5,14 +5,15 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <fragment
-        android:id="@+id/nav_host_fragment_activity_main"
-        android:name="androidx.navigation.fragment.NavHostFragment"
+    <!-- ViewPager2 to allow swiping between Control and Gallery -->
+    <androidx.viewpager2.widget.ViewPager2
+        android:id="@+id/viewPager"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        app:defaultNavHost="true"
-        app:navGraph="@navigation/nav_graph" />
+        android:layout_gravity="top"
+        app:layout_behavior="@string/appbar_scrolling_view_behavior" />
 
+    <!-- Bottom Navigation View (still visible, optional for switching tabs) -->
     <com.google.android.material.bottomnavigation.BottomNavigationView
         android:id="@+id/navView"
         android:layout_width="match_parent"

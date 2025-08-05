@@ -2,6 +2,8 @@ package com.example.msiandroidapp.ui.gallery
 
 import android.content.Intent
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.*
 import androidx.core.content.FileProvider
 import androidx.fragment.app.Fragment
@@ -61,6 +63,8 @@ class GalleryFragment : Fragment() {
         }
     }
 
+    private val handler = Handler(Looper.getMainLooper())
+
     private fun updateAdapterList(dbSessions: List<Session>) {
         val isCapturing = controlViewModel.isCapturing.value ?: false
         val bitmaps = controlViewModel.capturedBitmaps.value ?: emptyList()
@@ -68,16 +72,29 @@ class GalleryFragment : Fragment() {
 
         val result = mutableListOf<SessionListItem>()
 
-        // If an in-progress session exists, add it as a header item
-        if (isCapturing && bitmaps.any { it != null }) {
+        // Show in-progress while capturing or not yet full
+        if ((isCapturing || imageCount < 16) && bitmaps.any { it != null }) {
             result.add(SessionListItem.InProgress(bitmaps, imageCount))
         }
+        // Show "All images received" for 2 seconds
+        else if (imageCount == 16) {
+            result.add(SessionListItem.InProgress(bitmaps, imageCount))
+            handler.postDelayed({
+                refreshCompletedOnly(dbSessions)
+            }, 2000)
+        }
 
-        // Add all completed sessions
+        // Add completed sessions
         result.addAll(dbSessions.map { SessionListItem.Completed(it) })
-
         adapter.submitList(result)
     }
+
+    private fun refreshCompletedOnly(dbSessions: List<Session>) {
+        adapter.submitList(dbSessions.map { SessionListItem.Completed(it) })
+    }
+
+
+
 
     private fun onSessionClicked(session: Session) {
         // If clicked on a completed session, open the detail activity
