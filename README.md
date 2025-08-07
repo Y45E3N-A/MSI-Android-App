@@ -124,20 +124,9 @@ Images and metadata are stored in:
 /storage/emulated/0/Android/data/com.example.msiandroidapp/files/Sessions/
 ```
 
-## 🚧 Known Issues
-
-- GPS data may be imprecise indoors.
-- Android 10+ restricts background service/network access; ensure appropriate permissions are granted.
-- Some LED leakage can still occur due to circuit limitations (see MSI v2 circuit report).
-
-## 🔐 License
-
-MIT License – free to use, modify, and distribute.
-
 ## 🙋‍♂️ Acknowledgements
 
 - MSI v2 Circuit & Hardware Design: [Matei Rosca]
 - Android App Development: Yaseen Ahmed
 - Raspberry Pi integration and firmware: [Collaborators TBD]
 
-For access to hardware schematics and board files, email **matei.rosca@manchester.ac.uk**.
