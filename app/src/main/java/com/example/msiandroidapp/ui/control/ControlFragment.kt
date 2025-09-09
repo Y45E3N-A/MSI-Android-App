@@ -1,9 +1,11 @@
 package com.example.msiandroidapp.ui.control
 
-import com.example.msiandroidapp.ui.control.ControlViewModel
+import android.annotation.SuppressLint
+import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.location.Location
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -11,39 +13,35 @@ import android.util.Base64
 import android.util.Log
 import android.view.*
 import android.widget.*
+import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.lifecycle.lifecycleScope
 import com.example.msiandroidapp.R
+import com.example.msiandroidapp.data.AppDatabase
+import com.example.msiandroidapp.data.CalibrationProfile
+import com.example.msiandroidapp.data.Session
 import com.example.msiandroidapp.databinding.FragmentControlBinding
-import com.example.msiandroidapp.network.PiSocketManager
 import com.example.msiandroidapp.network.PiApiService
+import com.example.msiandroidapp.network.PiSocketManager
 import com.example.msiandroidapp.util.UploadProgressBus
+import com.google.android.gms.location.LocationServices
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.tasks.await
+import kotlinx.coroutines.withContext
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.SocketTimeoutException
-import androidx.appcompat.app.AlertDialog
-import com.example.msiandroidapp.data.Session
-import com.example.msiandroidapp.data.AppDatabase
-import android.annotation.SuppressLint
-import android.location.Location
-import com.google.android.gms.location.LocationServices
-import kotlinx.coroutines.tasks.await
 import java.text.SimpleDateFormat
 import java.util.Date
-import android.content.Context
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.withContext
-import com.example.msiandroidapp.data.CalibrationProfile
-
 
 @SuppressLint("MissingPermission")
 suspend fun getLastKnownLocationString(context: Context): String {
@@ -79,6 +77,10 @@ class ControlFragment : Fragment() {
     private var ledWarmingListener: CompoundButton.OnCheckedChangeListener? = null
     private var cameraPreviewListener: CompoundButton.OnCheckedChangeListener? = null
 
+    // Deduplicate calibration event handlers and saves
+    private var calHandlersRegistered = false
+    @Volatile private var calSaveInFlight = false
+
     // JSON media type
     private val JSON = "application/json; charset=utf-8".toMediaType()
 
@@ -99,28 +101,14 @@ class ControlFragment : Fragment() {
         setupProgressBar()
         setupProgressObserver()
         setupCalibrationUi()
-        setupCalibrationObservers()   // <— observe VM calibration state
+        setupCalibrationObservers()
         restoreSavedIp()
         updatePiConnectionIndicator(null)
 
         // Reconnect + request state on view create
         if (currentIp.isNotEmpty()) {
             PiSocketManager.connect(currentIp, ::onPreviewImageEvent, ::onPiStateUpdate)
-
-            // Register calibration event handlers
-            PiSocketManager.on("cal_progress") { data ->
-                try { onCalProgress(data as JSONObject) } catch (_: Exception) {}
-            }
-            PiSocketManager.on("cal_complete") { data ->
-                try { onCalComplete(data as JSONObject) } catch (_: Exception) {}
-            }
-            PiSocketManager.on("cal_error") { data ->
-                val msg = try {
-                    if (data is JSONObject) data.optString("message", data.toString()) else data.toString()
-                } catch (_: Exception) { data.toString() }
-                onCalError(msg)
-            }
-
+            hookCalibrationEventsOnce()
             PiSocketManager.emit("get_state", JSONObject())
         }
 
@@ -172,7 +160,6 @@ class ControlFragment : Fragment() {
     // =========================
 
     private fun setupCalibrationUi() {
-        // Ensure these exist in your layout: buttonCalibrate, buttonCancelCal, calProgressBar, calProgressText
         binding.calProgressBar.max = 16
         binding.calProgressBar.progress = 0
         binding.calProgressBar.visibility = View.GONE
@@ -198,7 +185,6 @@ class ControlFragment : Fragment() {
     }
 
     private fun setupCalibrationObservers() {
-        // Lock UI and toggle buttons based on VM calibration state
         controlViewModel.isCalibrating.observe(viewLifecycleOwner) { calibrating ->
             val busy = isCaptureOngoing || calibrating || !isPiConnected
             setUiBusy(busy)
@@ -210,7 +196,6 @@ class ControlFragment : Fragment() {
             }
         }
 
-        // Progress numbers
         controlViewModel.calChannelIndex.observe(viewLifecycleOwner) { idx ->
             val total = controlViewModel.calTotalChannels.value ?: 16
             if (controlViewModel.isCalibrating.value == true) {
@@ -236,7 +221,7 @@ class ControlFragment : Fragment() {
         val roiW = prefs.getFloat("roi_w", 0.40f).toDouble()
         val roiH = prefs.getFloat("roi_h", 0.65f).toDouble()
         val target = prefs.getFloat("cal_target", 0.80f).toDouble()
-        val ledNormsStr = prefs.getString("led_norms_json", null)  // prefs fallback
+        val ledNormsStr = prefs.getString("led_norms_json", null)
 
         if (currentIp.isEmpty()) {
             Toast.makeText(requireContext(), "Set IP address first", Toast.LENGTH_SHORT).show()
@@ -244,19 +229,10 @@ class ControlFragment : Fragment() {
         }
 
         lifecycleScope.launch {
-            // 1) Load latest norms from DB (IO) — inside the coroutine
-            val dao = AppDatabase.getDatabase(requireContext().applicationContext).calibrationDao()
-            val latest = withContext(Dispatchers.IO) { dao.getLatest() }
-            val normsFromDb: JSONArray? = latest?.let { prof ->
-                if (prof.ledNorms.size == 16) JSONArray(prof.ledNorms) else null
-            }
-            val normsFromPrefs: JSONArray? =
+            val normsJson = try {
                 if (!ledNormsStr.isNullOrEmpty()) JSONArray(ledNormsStr) else null
+            } catch (_: Exception) { null }
 
-            // Prefer DB; else prefs; else none
-            val normsJson: JSONArray? = normsFromDb ?: normsFromPrefs
-
-            // 2) Build request body ONCE (fixes “conflicting declarations: val body”)
             val body = JSONObject().apply {
                 put("machine", "FB1")
                 put("roi_x", roiX); put("roi_y", roiY); put("roi_w", roiW); put("roi_h", roiH)
@@ -265,7 +241,6 @@ class ControlFragment : Fragment() {
             }
 
             try {
-                // 3) Do the network call on IO
                 val (code, isOk, errText) = withContext(Dispatchers.IO) {
                     val client = OkHttpClient.Builder()
                         .connectTimeout(java.time.Duration.ofSeconds(5))
@@ -302,7 +277,6 @@ class ControlFragment : Fragment() {
         }
     }
 
-
     private fun cancelCalibration() {
         if (currentIp.isEmpty()) {
             Toast.makeText(requireContext(), "Set IP address first", Toast.LENGTH_SHORT).show()
@@ -328,7 +302,6 @@ class ControlFragment : Fragment() {
         }
     }
 
-
     private fun showCalUi(start: Boolean) {
         if (start) {
             binding.calProgressBar.progress = 0
@@ -343,7 +316,6 @@ class ControlFragment : Fragment() {
     }
 
     private fun onCalProgress(data: JSONObject) {
-        // server payload: channel_index, total_channels, wavelength_nm, average_intensity, led_norm_prev, led_norm_new
         controlViewModel.updateCalibrationProgress(
             channelIndex = data.optInt("channel_index", 0),
             totalChannels = data.optInt("total_channels", 16),
@@ -355,54 +327,86 @@ class ControlFragment : Fragment() {
     }
 
     private fun onCalComplete(data: JSONObject) {
-        val norms = data.optJSONArray("led_norms")
-        val list = if (norms != null && norms.length() == 16) {
-            (0 until norms.length()).map { norms.optDouble(it, 1.0) }
-        } else null
+        // prevent duplicate inserts if handler somehow fires twice
+        if (calSaveInFlight) return
+        calSaveInFlight = true
 
-        // Persist to prefs (existing behavior)
-        if (norms != null && norms.length() == 16) {
-            val prefs = requireActivity()
-                .getSharedPreferences("APP_SETTINGS", Context.MODE_PRIVATE)
-            prefs.edit().putString("led_norms_json", norms.toString()).apply()
+        val normsArr = data.optJSONArray("led_norms")
+        val ledNorms: List<Double> =
+            if (normsArr != null && normsArr.length() == 16)
+                (0 until normsArr.length()).map { i -> normsArr.optDouble(i, 1.0) }
+            else
+                emptyList()
+
+        if (ledNorms.size == 16) {
+            val prefs = requireActivity().getSharedPreferences("APP_SETTINGS", Context.MODE_PRIVATE)
+            prefs.edit().putString("led_norms_json", normsArr.toString()).apply()
         }
 
-        // NEW: persist to Room as a CalibrationProfile
         lifecycleScope.launch {
             val ctx = requireContext().applicationContext
             val prefs = requireActivity().getSharedPreferences("APP_SETTINGS", Context.MODE_PRIVATE)
 
-            val roiX = prefs.getFloat("roi_x", 0.30f).toDouble()
-            val roiY = prefs.getFloat("roi_y", 0.16f).toDouble()
-            val roiW = prefs.getFloat("roi_w", 0.40f).toDouble()
-            val roiH = prefs.getFloat("roi_h", 0.65f).toDouble()
-            val target = prefs.getFloat("cal_target", 0.80f).toDouble()
+            val roiX = prefs.getFloat("roi_x", 0.30f)
+            val roiY = prefs.getFloat("roi_y", 0.16f)
+            val roiW = prefs.getFloat("roi_w", 0.40f)
+            val roiH = prefs.getFloat("roi_h", 0.65f)
+            val target = prefs.getFloat("cal_target", 0.80f)
 
-            val name = "Cal • ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm").format(java.util.Date())}"
+            val name = "Calibration • " + SimpleDateFormat("yyyy-MM-dd HH:mm").format(Date())
+            val summary = buildString {
+                append(if (ledNorms.size == 16) "16 LED norms saved" else "No norms returned")
+                append(" • target=").append(String.format("%.2f", target))
+                append(" • ROI x=").append(String.format("%.2f", roiX))
+                append(", y=").append(String.format("%.2f", roiY))
+                append(", w=").append(String.format("%.2f", roiW))
+                append(", h=").append(String.format("%.2f", roiH))
+            }
+
             val profile = CalibrationProfile(
+                createdAt = System.currentTimeMillis(),
                 name = name,
-                machine = "FB1",
-                roiX = roiX, roiY = roiY, roiW = roiW, roiH = roiH,
-                targetIntensity = target,
-                ledNorms = list ?: emptyList(),
-                notes = data.optString("message", null)
+                summary = summary,
+                previewPath = null,
+                ledNorms = ledNorms
             )
 
-            AppDatabase.getDatabase(ctx).calibrationDao().insert(profile)
-        }
+            withContext(Dispatchers.IO) {
+                AppDatabase.getDatabase(ctx).calibrationDao().insert(profile)
+            }
 
-        controlViewModel.completeCalibration(list)
+            controlViewModel.completeCalibration(ledNorms)
 
-        requireActivity().runOnUiThread {
-            Toast.makeText(requireContext(), "Calibration complete", Toast.LENGTH_SHORT).show()
-            showCalUi(start = false)
-            setUiBusy(false)
+            if (isAdded) {
+                requireActivity().runOnUiThread {
+                    Toast.makeText(requireContext(), "Calibration complete", Toast.LENGTH_SHORT).show()
+                    showCalUi(start = false)
+                    setUiBusy(false)
+                }
+            }
+            calSaveInFlight = false
         }
     }
 
+    private fun hookCalibrationEventsOnce() {
+        if (calHandlersRegistered) return
+        calHandlersRegistered = true
+
+        PiSocketManager.on("cal_progress") { data ->
+            (data as? JSONObject)?.let { onCalProgress(it) }
+        }
+        PiSocketManager.on("cal_complete") { data ->
+            (data as? JSONObject)?.let { onCalComplete(it) }
+        }
+        PiSocketManager.on("cal_error") { data ->
+            val msg = (data as? JSONObject)?.optString("message") ?: data.toString()
+            onCalError(msg)
+        }
+    }
 
     private fun onCalError(message: String) {
         controlViewModel.failCalibration()
+        if (!isAdded) return
         requireActivity().runOnUiThread {
             Toast.makeText(requireContext(), "Calibration error: $message", Toast.LENGTH_LONG).show()
             showCalUi(start = false)
@@ -497,7 +501,6 @@ class ControlFragment : Fragment() {
         isCaptureOngoing = true
         setUiBusy(true)
         triggerButton("SW2")
-        // Reset progress in ViewModel
         controlViewModel.capturedBitmaps.value = MutableList(16) { null }
         controlViewModel.imageCount.value = 0
         controlViewModel.isCapturing.value = true
@@ -630,11 +633,9 @@ class ControlFragment : Fragment() {
     // =========================
 
     private fun setUiBusy(busy: Boolean) {
-        // "busy" = an operation is running (capture or calibration), NOT "disconnected"
         val isCal = controlViewModel.isCalibrating.value == true
         val connected = isPiConnected
 
-        // Controls that require a Pi connection
         val controlsEnabled = connected && !busy
         binding.switchLedWarming.isEnabled = controlsEnabled
         binding.switchCameraPreview.isEnabled = controlsEnabled
@@ -643,7 +644,6 @@ class ControlFragment : Fragment() {
         binding.buttonCalibrate.isEnabled = connected && !busy && !isCal
         binding.buttonCancelCal.isEnabled = connected && isCal
 
-        // IP entry should remain usable unless we are actively busy with an operation
         val ipFieldsEnabled = !busy
         binding.setIpButton.isEnabled = ipFieldsEnabled
         binding.ipAddressInput.isEnabled = ipFieldsEnabled
@@ -677,16 +677,8 @@ class ControlFragment : Fragment() {
                 saveIpToPrefs(enteredIp)
                 checkPiConnection(enteredIp)
 
-                // Connect + register handlers
                 PiSocketManager.connect(currentIp, ::onPreviewImageEvent, ::onPiStateUpdate)
-                PiSocketManager.on("cal_progress") { data -> try { onCalProgress(data as JSONObject) } catch (_: Exception) {} }
-                PiSocketManager.on("cal_complete") { data -> try { onCalComplete(data as JSONObject) } catch (_: Exception) {} }
-                PiSocketManager.on("cal_error") { data ->
-                    val msg = try {
-                        if (data is JSONObject) data.optString("message", data.toString()) else data.toString()
-                    } catch (_: Exception) { data.toString() }
-                    onCalError(msg)
-                }
+                hookCalibrationEventsOnce()
             } else {
                 updatePiConnectionIndicator(null)
             }
@@ -706,15 +698,7 @@ class ControlFragment : Fragment() {
             binding.ipAddressInput.setText(savedIp)
             PiApiService.setBaseUrl(savedIp)
             PiSocketManager.connect(currentIp, ::onPreviewImageEvent, ::onPiStateUpdate)
-            // Ensure calibration events are hooked
-            PiSocketManager.on("cal_progress") { data -> try { onCalProgress(data as JSONObject) } catch (_: Exception) {} }
-            PiSocketManager.on("cal_complete") { data -> try { onCalComplete(data as JSONObject) } catch (_: Exception) {} }
-            PiSocketManager.on("cal_error") { data ->
-                val msg = try {
-                    if (data is JSONObject) data.optString("message", data.toString()) else data.toString()
-                } catch (_: Exception) { data.toString() }
-                onCalError(msg)
-            }
+            hookCalibrationEventsOnce()
         }
     }
 
@@ -747,7 +731,6 @@ class ControlFragment : Fragment() {
 
         isPiConnected = (connected == true)
 
-        // Only operations should lock the UI, not a missing connection.
         val operationBusy = isCaptureOngoing || (controlViewModel.isCalibrating.value == true)
         setUiBusy(operationBusy)
     }
@@ -815,11 +798,9 @@ class ControlFragment : Fragment() {
             val calFromPi = data.optBoolean("calibrating", false)
             val lastButton = data.optString("last_button", "")
 
-            // reflect Pi's calibrating state into VM
             controlViewModel.isCalibrating.value =
                 calFromPi || (controlViewModel.isCalibrating.value == true)
 
-            // Avoid recursive triggers while updating switches
             binding.switchLedWarming.setOnCheckedChangeListener(null)
             binding.switchCameraPreview.setOnCheckedChangeListener(null)
             binding.switchLedWarming.isChecked = sw3

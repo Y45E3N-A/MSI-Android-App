@@ -1,109 +1,110 @@
 package com.example.msiandroidapp.ui.gallery
 
-import android.content.Intent
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
 import android.view.*
-import androidx.core.content.FileProvider
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.viewModels
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
+import androidx.lifecycle.lifecycleScope
 import com.example.msiandroidapp.R
 import com.example.msiandroidapp.data.AppDatabase
 import com.example.msiandroidapp.data.Session
+import com.example.msiandroidapp.data.CalibrationProfile
 import com.example.msiandroidapp.ui.control.ControlViewModel
-import com.example.msiandroidapp.network.PiSocketManager
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import android.content.Intent
+import androidx.core.content.FileProvider
 import java.io.File
-import androidx.lifecycle.lifecycleScope
 
 class GalleryFragment : Fragment() {
 
     private lateinit var recyclerView: RecyclerView
-    private lateinit var adapter: SessionAdapter
+    private lateinit var adapter: ResultsAdapter
     private val galleryViewModel: GalleryViewModel by viewModels()
     private val controlViewModel: ControlViewModel by activityViewModels()
+    private val handler = Handler(Looper.getMainLooper())
 
-    override fun onCreateView(
-        inflater: LayoutInflater, container: ViewGroup?,
-        savedInstanceState: Bundle?
-    ): View {
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         val root = inflater.inflate(R.layout.fragment_gallery, container, false)
         recyclerView = root.findViewById(R.id.gallery_recycler_view)
         recyclerView.layoutManager = LinearLayoutManager(requireContext())
-        adapter = SessionAdapter(
-            onClick = this::onSessionClicked,
-            onLongClick = this::onSessionLongClicked
+        adapter = ResultsAdapter(
+            onSessionClick = this::openSession,
+            onSessionLongClick = this::onSessionLongClicked,
+            onCalibrationClick = this::openCalibration,
+            onCalibrationLongClick = this::onCalibrationLongClicked
         )
         recyclerView.adapter = adapter
         return root
     }
-
-    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
-        // Ensure PiSocketManager is connected (it should be, from ControlFragment or initial app startup)
-        // Do NOT call disconnect here. You can listen to events if you want, but connection remains alive.
-
-        // Observe sessions from the ViewModel and also the shared capture state
-        galleryViewModel.allSessions.observe(viewLifecycleOwner) { sessions ->
-            updateAdapterList(sessions)
-        }
-        // Observe the shared capture state
-        controlViewModel.isCapturing.observe(viewLifecycleOwner) { _ ->
-            updateAdapterList(galleryViewModel.allSessions.value ?: emptyList())
-        }
-        controlViewModel.capturedBitmaps.observe(viewLifecycleOwner) { _ ->
-            updateAdapterList(galleryViewModel.allSessions.value ?: emptyList())
-        }
-        controlViewModel.imageCount.observe(viewLifecycleOwner) { _ ->
-            updateAdapterList(galleryViewModel.allSessions.value ?: emptyList())
+    private fun deleteSession(session: Session) {
+        // Optionally remove the image files too
+        lifecycleScope.launch(Dispatchers.IO) {
+            try {
+                // Delete files from storage (ignore failures)
+                session.imagePaths.forEach { path ->
+                    runCatching { File(path).delete() }
+                }
+                // Delete DB row
+                AppDatabase.getDatabase(requireContext().applicationContext)
+                    .sessionDao()
+                    .delete(session)
+            } catch (e: Exception) {
+                // Swallow or log if you prefer
+                e.printStackTrace()
+            }
+            // LiveData from Room will auto-update the list
         }
     }
 
-    private val handler = Handler(Looper.getMainLooper())
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        // Combine results + in-progress preview
+        galleryViewModel.results.observe(viewLifecycleOwner) { results ->
+            submitMerged(results)
+        }
+        // Track capture state for the in-progress banner/grid
+        listOf(
+            controlViewModel.isCapturing,
+            controlViewModel.capturedBitmaps,
+            controlViewModel.imageCount
+        ).forEach { live ->
+            live.observe(viewLifecycleOwner) { submitMerged(galleryViewModel.results.value ?: emptyList()) }
+        }
+    }
 
-    private fun updateAdapterList(dbSessions: List<Session>) {
+    private fun buildInProgressItemOrNull(): ResultListItem.InProgress? {
         val isCapturing = controlViewModel.isCapturing.value ?: false
         val bitmaps = controlViewModel.capturedBitmaps.value ?: emptyList()
         val imageCount = controlViewModel.imageCount.value ?: 0
-
-        val result = mutableListOf<SessionListItem>()
-
-        // Show in-progress while capturing or not yet full
-        if ((isCapturing || imageCount < 16) && bitmaps.any { it != null }) {
-            result.add(SessionListItem.InProgress(bitmaps, imageCount))
-        }
-        // Show "All images received" for 2 seconds
-        else if (imageCount == 16) {
-            result.add(SessionListItem.InProgress(bitmaps, imageCount))
-            handler.postDelayed({
-                refreshCompletedOnly(dbSessions)
-            }, 2000)
-        }
-
-        // Add completed sessions
-        result.addAll(dbSessions.map { SessionListItem.Completed(it) })
-        adapter.submitList(result)
+        return if ((isCapturing || imageCount < 16) && bitmaps.any { it != null }) {
+            ResultListItem.InProgress(bitmaps, imageCount)
+        } else if (imageCount == 16 && bitmaps.any { it != null }) {
+            // show "All images received" grid for 2s then drop
+            handler.postDelayed({ submitMerged(galleryViewModel.results.value ?: emptyList(), forceHideInProgress = true) }, 2000)
+            ResultListItem.InProgress(bitmaps, imageCount)
+        } else null
     }
 
-    private fun refreshCompletedOnly(dbSessions: List<Session>) {
-        adapter.submitList(dbSessions.map { SessionListItem.Completed(it) })
+    private var hideInProgressOnce = false
+    private fun submitMerged(results: List<ResultListItem>, forceHideInProgress: Boolean = false) {
+        if (forceHideInProgress) hideInProgressOnce = true
+        val merged = mutableListOf<ResultListItem>()
+        val inProg = if (!hideInProgressOnce) buildInProgressItemOrNull() else null
+        if (inProg != null) merged.add(inProg)
+        merged.addAll(results)
+        adapter.submitList(merged)
     }
 
-
-
-
-    private fun onSessionClicked(session: Session) {
-        // If clicked on a completed session, open the detail activity
-        val intent = SessionDetailActivity.newIntent(requireContext(), session.id)
-        startActivity(intent)
+    private fun openSession(session: Session) {
+        startActivity(SessionDetailActivity.newIntent(requireContext(), session.id))
     }
 
     private fun onSessionLongClicked(session: Session) {
-        // Show a dialog for share or delete
         androidx.appcompat.app.AlertDialog.Builder(requireContext())
             .setTitle("Session Options")
             .setItems(arrayOf("Share", "Delete")) { _, which ->
@@ -116,14 +117,25 @@ class GalleryFragment : Fragment() {
     }
 
     private fun shareSession(session: Session) {
-        val uris = session.imagePaths.map { path ->
+        val uris = session.imagePaths.mapNotNull { path ->
             val file = File(path)
-            FileProvider.getUriForFile(
-                requireContext(),
-                "${requireContext().packageName}.fileprovider",
-                file
-            )
+            if (file.exists()) {
+                FileProvider.getUriForFile(
+                    requireContext(),
+                    "${requireContext().packageName}.fileprovider",
+                    file
+                )
+            } else null
         }
+
+        if (uris.isEmpty()) {
+            androidx.appcompat.app.AlertDialog.Builder(requireContext())
+                .setMessage("No images found to share.")
+                .setPositiveButton("OK", null)
+                .show()
+            return
+        }
+
         val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
             type = "image/*"
             putParcelableArrayListExtra(Intent.EXTRA_STREAM, ArrayList(uris))
@@ -132,11 +144,44 @@ class GalleryFragment : Fragment() {
         startActivity(Intent.createChooser(intent, "Share Session"))
     }
 
-    private fun deleteSession(session: Session) {
-        lifecycleScope.launch(Dispatchers.IO) {
-            AppDatabase.getDatabase(requireContext()).sessionDao().delete(session)
+
+    private fun openCalibration(profile: CalibrationProfile) {
+        // Order must match the Pi’s LED index order (0..15)
+        val wavelengthsNm = intArrayOf(
+            570, 555, 528, 415, 395, 450, 470, 505,
+            640, 660, 730, 850, 880, 625, 610, 590
+        )
+
+        val lines = if (profile.ledNorms.size == 16) {
+            profile.ledNorms.mapIndexed { i, n ->
+                val wl = wavelengthsNm.getOrNull(i)?.toString() ?: "Ch$i"
+                "• ${wl} nm  —  ${"%.3f".format(n)}"
+            }
+        } else {
+            listOf("No per-channel norms stored.")
         }
+
+        val fullMsg = buildString {
+            appendLine(profile.summary ?: "Calibration")
+            appendLine()
+            appendLine("Per-channel norms:")
+            lines.forEach { appendLine(it) }
+        }
+
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle(profile.name)
+            .setMessage(fullMsg)
+            .setPositiveButton("OK", null)
+            .show()
     }
 
-
+    private fun onCalibrationLongClicked(profile: CalibrationProfile) {
+        androidx.appcompat.app.AlertDialog.Builder(requireContext())
+            .setTitle("Calibration Options")
+            .setItems(arrayOf("Delete")) { _, _ ->
+                lifecycleScope.launch(Dispatchers.IO) {
+                    AppDatabase.getDatabase(requireContext()).calibrationDao().delete(profile)
+                }
+            }.show()
+    }
 }
