@@ -21,12 +21,13 @@
             android:padding="16dp"
             android:gravity="center_horizontal">
 
-            <!-- Your control widgets -->
+            <!-- System / Network -->
             <Button
-                android:id="@+id/button_shutdown"
+                android:id="@+id/buttonShutdown"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Shutdown"/>
+                android:text="Shutdown"
+                android:layout_marginBottom="12dp"/>
 
             <EditText
                 android:id="@+id/ipAddressInput"
@@ -41,21 +42,20 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="Set IP Address"
-                android:layout_marginBottom="8dp" />
-
+                android:layout_marginBottom="12dp" />
 
             <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
-                android:layout_marginBottom="24dp">
+                android:layout_marginBottom="16dp">
 
                 <View
                     android:id="@+id/piConnectionDot"
                     android:layout_width="16dp"
                     android:layout_height="16dp"
-                    android:background="@drawable/circle_green"
+                    android:background="@drawable/circle_grey"
                     android:layout_marginEnd="8dp"/>
                 <TextView
                     android:id="@+id/piConnectionStatus"
@@ -71,8 +71,9 @@
                 android:layout_height="wrap_content"
                 android:text="Pi Button Pressed: --"
                 android:textSize="18sp"
-                android:layout_marginBottom="24dp" />
+                android:layout_marginBottom="20dp" />
 
+            <!-- Capture controls -->
             <Button
                 android:id="@+id/button1"
                 android:layout_width="match_parent"
@@ -96,23 +97,75 @@
                 android:text="Camera Preview"
                 android:textOn="Camera Preview ON"
                 android:textOff="Camera Preview OFF"
-                android:layout_marginBottom="12dp" />
+                android:layout_marginBottom="16dp" />
 
             <ProgressBar
                 android:id="@+id/captureProgressBar"
                 style="?android:attr/progressBarStyleHorizontal"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:visibility="gone"
-                android:max="16"/>
+                android:max="16"
+                android:visibility="gone" />
 
             <TextView
                 android:id="@+id/captureProgressText"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text=""
-                android:visibility="gone"/>
+                android:visibility="gone"
+                android:layout_marginBottom="20dp"/>
 
+            <!-- Calibration section -->
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="Calibration"
+                android:textStyle="bold"
+                android:textSize="16sp"
+                android:layout_marginTop="8dp"
+                android:layout_marginBottom="8dp"/>
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="12dp">
+
+                <Button
+                    android:id="@+id/buttonCalibrate"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Calibrate"/>
+
+                <Space
+                    android:layout_width="12dp"
+                    android:layout_height="1dp" />
+
+                <Button
+                    android:id="@+id/buttonCancelCal"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Cancel"
+                    android:enabled="false"/>
+            </LinearLayout>
+
+            <ProgressBar
+                android:id="@+id/calProgressBar"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:max="16"
+                android:visibility="gone" />
+
+            <TextView
+                android:id="@+id/calProgressText"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:visibility="gone" />
         </LinearLayout>
     </ScrollView>
 
@@ -131,6 +184,6 @@
             android:id="@+id/preview_container"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:background="@android:color/black"/>
+            android:background="@android:color/black" />
     </ScrollView>
 </LinearLayout>

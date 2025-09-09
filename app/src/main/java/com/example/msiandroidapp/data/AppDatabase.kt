@@ -6,10 +6,19 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 
-@Database(entities = [Session::class], version = 1)
+@Database(
+    entities = [
+        Session::class,
+        CalibrationProfile::class,   // NEW
+    ],
+    version = 2,                    // 🔺 bump version
+    exportSchema = true
+)
 @TypeConverters(Converters::class)
 abstract class AppDatabase : RoomDatabase() {
+
     abstract fun sessionDao(): SessionDao
+    abstract fun calibrationDao(): CalibrationDao   // NEW
 
     companion object {
         @Volatile
@@ -21,7 +30,12 @@ abstract class AppDatabase : RoomDatabase() {
                     context.applicationContext,
                     AppDatabase::class.java,
                     "gallery_db"
-                ).build().also { INSTANCE = it }
+                )
+                    // During development this avoids migration crashes.
+                    // Later, replace with a proper Migration(1,2){...}
+                    .fallbackToDestructiveMigration()
+                    .build()
+                    .also { INSTANCE = it }
             }
         }
     }
