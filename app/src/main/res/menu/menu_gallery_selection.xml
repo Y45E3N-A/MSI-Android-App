@@ -2,6 +2,28 @@
 <menu xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto">
 
+    <!-- Filter (always visible; submenu) -->
+    <item
+        android:id="@+id/action_filter"
+        android:title="Filter"
+        android:icon="@drawable/ic_filter_list"
+        app:showAsAction="always">
+        <menu>
+            <item
+                android:id="@+id/filter_all"
+                android:title="All"
+                android:checkable="true" />
+            <item
+                android:id="@+id/filter_sessions"
+                android:title="Sessions"
+                android:checkable="true" />
+            <item
+                android:id="@+id/filter_calibrations"
+                android:title="Calibrations"
+                android:checkable="true" />
+        </menu>
+    </item>
+
     <!-- Select all visible items (sessions + calibrations) -->
     <item
         android:id="@+id/action_select_all"
@@ -17,6 +39,13 @@
         android:contentDescription="Share selected"
         android:icon="@drawable/ic_share"
         app:showAsAction="ifRoom" />
+
+    <!-- Rename selected item -->
+    <item
+        android:id="@+id/action_rename_inline"
+        android:title="Rename"
+        android:icon="@drawable/ic_edit_24"
+        app:showAsAction="always" />
 
     <!-- Delete selected items -->
     <item

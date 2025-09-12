@@ -62,9 +62,11 @@
                     android:id="@+id/ipAddressInput"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:inputType="textNoSuggestions"
-                    android:singleLine="true"
                     android:hint="e.g. 192.168.4.1"
+                    android:singleLine="true"
+                    android:imeOptions="actionDone"
+                    android:inputType="numberDecimal"
+                    android:digits="0123456789."
                     android:contentDescription="IP address input"/>
             </com.google.android.material.textfield.TextInputLayout>
 
@@ -122,7 +124,7 @@
                 android:id="@+id/lastPiButtonText"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Pi Button Pressed: --"
+                android:text="MSI Button Pressed: --"
                 android:textSize="18sp"
                 android:layout_marginBottom="20dp" />
 

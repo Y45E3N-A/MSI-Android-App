@@ -120,7 +120,7 @@ class UploadServer(
     }
 
     private fun createAndInsertSession(sessionId: String, imagePaths: List<String>) {
-        val timestamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
+        val timestamp = SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.getDefault()).format(Date())
 
         val fusedLocationClient = LocationServices.getFusedLocationProviderClient(context)
         try {

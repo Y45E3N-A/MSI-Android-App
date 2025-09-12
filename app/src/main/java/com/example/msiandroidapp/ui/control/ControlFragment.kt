@@ -32,9 +32,10 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.tasks.await
 import kotlinx.coroutines.withContext
-import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.ConnectionPool
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
@@ -42,44 +43,73 @@ import java.io.IOException
 import java.net.SocketTimeoutException
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.concurrent.TimeUnit
+
+// ---------- helpers ----------
+private val JSON = "application/json; charset=utf-8".toMediaType()
 
 @SuppressLint("MissingPermission")
 suspend fun getLastKnownLocationString(context: Context): String {
-    val fusedLocationClient = LocationServices.getFusedLocationProviderClient(context)
-    val location: Location? = try { fusedLocationClient.lastLocation.await() } catch (_: Exception) { null }
-    return if (location != null) "Lat: %.5f, Lon: %.5f".format(location.latitude, location.longitude) else "Unknown"
+    val fused = LocationServices.getFusedLocationProviderClient(context)
+    val loc: Location? = try { fused.lastLocation.await() } catch (_: Exception) { null }
+    return if (loc != null) "Lat: %.5f, Lon: %.5f".format(loc.latitude, loc.longitude) else "Unknown"
 }
 
 class ControlFragment : Fragment() {
 
+    // ---------- view / vm ----------
     private var _binding: FragmentControlBinding? = null
     private val binding get() = _binding!!
-
     private val controlViewModel: ControlViewModel by activityViewModels()
 
+    // ---------- state ----------
     private var currentIp = ""
-    private val connectionCheckHandler = Handler(Looper.getMainLooper())
-    private var connectionCheckRunnable: Runnable? = null
-    private val refreshIntervalMs = 5000L
+    private var isPiConnected = false
+    private var isCaptureOngoing = false
+    private var calHandlersRegistered = false
+    @Volatile private var calSaveInFlight = false
+    private var isConnecting = false
 
+    // Connection health / watchdog + debounce
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val connectionPollHandler = Handler(Looper.getMainLooper())
+
+    // Periodic lightweight HTTP /status poll (to catch edge cases)
+    private var pollRunnable: Runnable? = null
+    private var refreshIntervalMs = 5000L
+    private var lastSocketSeenAtMs = 0L
+    private var consecutiveStatusFailures = 0
+    private var lastStatusCall: okhttp3.Call? = null
+
+    // Debounced disconnect
+    private var pendingDisconnectRunnable: Runnable? = null
+    private val disconnectGraceMs = 3000L // <-- GRACE PERIOD
+
+    private fun markSocketSeen() { lastSocketSeenAtMs = System.currentTimeMillis() }
+
+    // preview
     private enum class PreviewMode { NONE, IMAGE_CAPTURE, LIVE_FEED }
     private var currentPreviewMode: PreviewMode = PreviewMode.NONE
-
     private lateinit var previewContainer: FrameLayout
     private lateinit var previewScrollView: ScrollView
     private var imageGrid: GridLayout? = null
     private val capturedImageViews = mutableListOf<ImageView>()
     private var liveFeedImageView: ImageView? = null
-    private var isPiConnected = false
-    private var isCaptureOngoing = false
-
     private var cameraPreviewListener: CompoundButton.OnCheckedChangeListener? = null
 
-    private var calHandlersRegistered = false
-    @Volatile private var calSaveInFlight = false
+    // fast HTTP client for /status — avoid stale sockets
+    private val quickClient by lazy {
+        OkHttpClient.Builder()
+            .connectionPool(ConnectionPool(0, 1, TimeUnit.SECONDS))
+            .retryOnConnectionFailure(false)
+            .callTimeout(java.time.Duration.ofSeconds(3))
+            .connectTimeout(java.time.Duration.ofSeconds(2))
+            .readTimeout(java.time.Duration.ofSeconds(2))
+            .writeTimeout(java.time.Duration.ofSeconds(2))
+            .build()
+    }
 
-    private val JSON = "application/json; charset=utf-8".toMediaType()
-
+    // ---------- lifecycle ----------
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
         _binding = FragmentControlBinding.inflate(inflater, container, false)
         return binding.root
@@ -93,23 +123,26 @@ class ControlFragment : Fragment() {
         setupSwitchListeners()
         setupButtonListeners()
         setupIpButtonListener()
-        setupDisconnectButtonListener() // <-- NEW
+        setupDisconnectButtonListener()
         setupShutdownButtonListener()
         setupProgressBar()
         setupProgressObserver()
         setupCalibrationUi()
         setupCalibrationObservers()
+
         restoreSavedIp()
         updatePiConnectionIndicator(null)
+        setUiBusy(false)
 
-        // Reconnect + request state on view create
+        // reconnect if IP exists
         if (currentIp.isNotEmpty()) {
             PiSocketManager.connect(currentIp, ::onPreviewImageEvent, ::onPiStateUpdate)
+            attachSocketLifecycleHooks()
             hookCalibrationEventsOnce()
             PiSocketManager.emit("get_state", JSONObject())
         }
 
-        // Restore capture UI if needed
+        // restore capture UI
         val bitmaps = controlViewModel.capturedBitmaps.value ?: List(16) { null }
         val count = controlViewModel.imageCount.value ?: 0
         val capturing = controlViewModel.isCapturing.value ?: false
@@ -122,19 +155,20 @@ class ControlFragment : Fragment() {
             binding.captureProgressText.text = "Receiving images: $count/16"
         }
 
-        // Observers for capture
-        controlViewModel.capturedBitmaps.observe(viewLifecycleOwner) { updateImageGrid(it ?: List(16) { null }) }
-        controlViewModel.imageCount.observe(viewLifecycleOwner) { count2 ->
-            binding.captureProgressBar.progress = count2
-            binding.captureProgressText.text = "Receiving images: $count2/16"
-            if (count2 in 1..15) {
+        controlViewModel.capturedBitmaps.observe(viewLifecycleOwner) {
+            updateImageGrid(it ?: List(16) { null })
+        }
+        controlViewModel.imageCount.observe(viewLifecycleOwner) { c ->
+            binding.captureProgressBar.progress = c
+            binding.captureProgressText.text = "Receiving images: $c/16"
+            if (c in 1..15) {
                 binding.captureProgressBar.visibility = View.VISIBLE
                 binding.captureProgressText.visibility = View.VISIBLE
             } else {
                 binding.captureProgressBar.visibility = View.GONE
                 binding.captureProgressText.visibility = View.GONE
             }
-            if (count2 == 16) {
+            if (c == 16) {
                 binding.captureProgressText.text = "All images received!"
                 binding.captureProgressBar.visibility = View.VISIBLE
                 binding.captureProgressText.visibility = View.VISIBLE
@@ -142,59 +176,245 @@ class ControlFragment : Fragment() {
                 saveSessionToDatabase(bmaps)
             }
         }
-        controlViewModel.isCapturing.observe(viewLifecycleOwner) { capturing2 ->
-            if (!capturing2) {
+        controlViewModel.isCapturing.observe(viewLifecycleOwner) { capturingNow ->
+            if (!capturingNow) {
                 binding.captureProgressBar.visibility = View.GONE
                 binding.captureProgressText.visibility = View.GONE
             }
         }
     }
 
-    // =========================
-    // Disconnect (does NOT clear IP text or prefs)
-    // =========================
-
-    private fun setupDisconnectButtonListener() {
-        val btn = binding.buttonDisconnect
-        btn.setOnClickListener {
-            performDisconnect()
+    private fun setupShutdownButtonListener() {
+        binding.buttonShutdown.setOnClickListener {
+            if (currentIp.isEmpty()) {
+                Toast.makeText(requireContext(), "Set IP address first", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            AlertDialog.Builder(requireContext())
+                .setTitle("Shutdown System")
+                .setMessage("Are you sure you want to shut down the Pi and instrument?")
+                .setPositiveButton("Shutdown") { _, _ -> sendShutdownCommand() }
+                .setNegativeButton("Cancel", null)
+                .show()
         }
     }
 
-    private fun performDisconnect() {
-        // Stop periodic checks
-        stopAutoConnectionCheck()
+    private fun sendShutdownCommand() {
+        lifecycleScope.launch {
+            try {
+                val response = PiApiService.api.shutdownSystem()
+                if (response.isSuccessful) {
+                    Toast.makeText(requireContext(), "Shutdown command sent", Toast.LENGTH_SHORT).show()
+                } else {
+                    Toast.makeText(requireContext(), "Failed: ${response.code()}", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                Toast.makeText(requireContext(), "Network error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
 
-        // Stop previews
+    override fun onResume() {
+        super.onResume()
+        startAutoConnectionPoll()
+        if (currentIp.isNotEmpty()) PiSocketManager.emit("get_state", JSONObject())
+    }
+
+    override fun onPause() {
+        super.onPause()
+        stopAutoConnectionPoll()
+    }
+
+    override fun onDestroyView() {
+        clearPreview()
+        _binding = null
+        super.onDestroyView()
+    }
+
+    // ---------- connection controls ----------
+    private fun setupIpButtonListener() {
+        binding.setIpButton.setOnClickListener {
+            val enteredIp = binding.ipAddressInput.text.toString().trim()
+            if (enteredIp.isNotEmpty()) {
+                currentIp = enteredIp
+                PiApiService.setBaseUrl(enteredIp)
+                saveIpToPrefs(enteredIp)
+
+                isConnecting = true
+                setUiBusy(false)
+
+                PiSocketManager.connect(currentIp, ::onPreviewImageEvent, ::onPiStateUpdate)
+                attachSocketLifecycleHooks()
+                hookCalibrationEventsOnce()
+                checkPiConnection(enteredIp)
+            } else {
+                updatePiConnectionIndicator(null)
+            }
+        }
+    }
+
+    private fun setupDisconnectButtonListener() {
+        binding.buttonDisconnect.setOnClickListener { performDisconnect() }
+    }
+
+    private fun performDisconnect() {
+        stopAutoConnectionPoll()
+        lastStatusCall?.cancel()
+        consecutiveStatusFailures = 0
+        lastSocketSeenAtMs = 0L
+
+        cancelPendingDisconnect()
+
         turnOffSW4()
         clearPreview()
 
-        // Reset op flags
         isCaptureOngoing = false
         controlViewModel.isCapturing.value = false
         controlViewModel.imageCount.value = 0
         controlViewModel.isCalibrating.value = false
 
-        // Close socket connection safely
-        try {
-            PiSocketManager.disconnect()
-        } catch (_: Exception) { /* ignore */ }
+        try { PiSocketManager.disconnect() } catch (_: Exception) {}
 
-        // DO NOT clear currentIp or the EditText
-        // DO NOT clear saved prefs
         isPiConnected = false
+        isConnecting = false
         updatePiConnectionIndicator(false)
-
-        // Keep IP fields editable so user can reconnect
         setUiBusy(false)
 
         Toast.makeText(requireContext(), "Disconnected from Pi", Toast.LENGTH_SHORT).show()
     }
 
-    // =========================
-    // Calibration UI + actions
-    // =========================
+    private fun saveIpToPrefs(ip: String) {
+        val prefs = requireActivity().getSharedPreferences("APP_SETTINGS", Context.MODE_PRIVATE)
+        prefs.edit().putString("server_ip", ip).apply()
+    }
 
+    private fun restoreSavedIp() {
+        val prefs = requireActivity().getSharedPreferences("APP_SETTINGS", Context.MODE_PRIVATE)
+        val savedIp = prefs.getString("server_ip", "") ?: ""
+        if (savedIp.isNotEmpty()) {
+            currentIp = savedIp
+            binding.ipAddressInput.setText(savedIp)
+            PiApiService.setBaseUrl(savedIp)
+            PiSocketManager.connect(currentIp, ::onPreviewImageEvent, ::onPiStateUpdate)
+            attachSocketLifecycleHooks()
+            hookCalibrationEventsOnce()
+        }
+    }
+
+    // ---- Polling + debounced disconnect ----
+    private fun checkPiConnection(ip: String) {
+        // cancel previous poll so responses don't arrive out-of-order
+        lastStatusCall?.cancel()
+
+        val req = Request.Builder()
+            .url("http://$ip:5000/status")
+            .header("Connection", "close")
+            .get()
+            .build()
+
+        val call = quickClient.newCall(req)
+        lastStatusCall = call
+        call.enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: IOException) {
+                if (!isAdded) return
+                consecutiveStatusFailures++
+                // Do NOT flip UI immediately; schedule debounced disconnect
+                scheduleDebouncedDisconnect()
+            }
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                if (!isAdded) { response.close(); return }
+                response.close()
+                consecutiveStatusFailures = 0
+                // Immediate connect (also cancels any pending disconnect)
+                markSocketSeen()
+                runOnUi { updatePiConnectionIndicator(true) }
+                cancelPendingDisconnect()
+            }
+        })
+    }
+
+    private fun startAutoConnectionPoll() {
+        stopAutoConnectionPoll()
+        pollRunnable = object : Runnable {
+            override fun run() {
+                if (currentIp.isNotEmpty()) {
+                    checkPiConnection(currentIp)
+                    // If we haven't seen socket activity for a while, consider disconnect with grace
+                    val silentMs = System.currentTimeMillis() - lastSocketSeenAtMs
+                    if (silentMs > refreshIntervalMs) {
+                        // Use debounced disconnect rather than instant flip
+                        scheduleDebouncedDisconnect()
+                    }
+                } else {
+                    updatePiConnectionIndicator(null)
+                }
+                connectionPollHandler.postDelayed(this, refreshIntervalMs)
+            }
+        }
+        connectionPollHandler.post(pollRunnable!!)
+    }
+
+    private fun stopAutoConnectionPoll() {
+        pollRunnable?.let { connectionPollHandler.removeCallbacks(it) }
+    }
+
+    private fun scheduleDebouncedDisconnect() {
+        if (pendingDisconnectRunnable != null) return // already scheduled
+        pendingDisconnectRunnable = Runnable {
+            // Only mark disconnected if nothing connected us back in the meantime
+            val stillFailing = consecutiveStatusFailures >= 1 ||
+                    (System.currentTimeMillis() - lastSocketSeenAtMs) > disconnectGraceMs
+            if (stillFailing) {
+                updatePiConnectionIndicator(false)
+                clearPreview()
+                isCaptureOngoing = false
+                controlViewModel.isCapturing.value = false
+                setUiBusy(false)
+            }
+            pendingDisconnectRunnable = null
+        }
+        mainHandler.postDelayed(pendingDisconnectRunnable!!, disconnectGraceMs)
+    }
+
+    private fun cancelPendingDisconnect() {
+        pendingDisconnectRunnable?.let { mainHandler.removeCallbacks(it) }
+        pendingDisconnectRunnable = null
+    }
+
+    private fun updatePiConnectionIndicator(connected: Boolean?) {
+        val statusDrawable = when (connected) {
+            true -> R.drawable.circle_green
+            false -> R.drawable.circle_red
+            null -> R.drawable.circle_grey
+        }
+        binding.piConnectionStatus.text = when (connected) {
+            true -> "Status: Connected"
+            false -> "Status: Not Connected"
+            null -> "Status: Unknown"
+        }
+        binding.piConnectionDot.background =
+            ContextCompat.getDrawable(requireContext(), statusDrawable)
+
+        if (connected == true) {
+            isConnecting = false
+            isPiConnected = true
+            cancelPendingDisconnect()
+        } else if (connected == false) {
+            isPiConnected = false
+        }
+
+        if (connected == false) {
+            turnOffSW4()
+            clearPreview()
+            isCaptureOngoing = false
+            controlViewModel.isCapturing.value = false
+        }
+
+        val operationBusy = isCaptureOngoing || (controlViewModel.isCalibrating.value == true)
+        setUiBusy(operationBusy && isPiConnected)
+    }
+
+    // ---------- calibration ----------
     private fun setupCalibrationUi() {
         binding.calProgressBar.max = 16
         binding.calProgressBar.progress = 0
@@ -213,7 +433,7 @@ class ControlFragment : Fragment() {
 
     private fun setupCalibrationObservers() {
         controlViewModel.isCalibrating.observe(viewLifecycleOwner) { calibrating ->
-            val busy = isCaptureOngoing || calibrating || !isPiConnected
+            val busy = isCaptureOngoing || calibrating
             setUiBusy(busy)
             binding.buttonCalibrate.isEnabled = isPiConnected && !isCaptureOngoing && !calibrating
             if (!calibrating) {
@@ -286,7 +506,7 @@ class ControlFragment : Fragment() {
 
                 if (isOk) {
                     controlViewModel.startCalibration(totalChannels = 16)
-                    showCalUi(start = true)
+                    showCalUi(true)
                     setUiBusy(true)
                     Toast.makeText(requireContext(), "Calibration started", Toast.LENGTH_SHORT).show()
                 } else {
@@ -316,6 +536,46 @@ class ControlFragment : Fragment() {
         }
     }
 
+    private fun hookCalibrationEventsOnce() {
+        if (calHandlersRegistered) return
+        calHandlersRegistered = true
+
+        PiSocketManager.on("cal_progress") { data ->
+            markSocketSeen()
+            (data as? JSONObject)?.let { onCalProgress(it) }
+        }
+        PiSocketManager.on("cal_complete") { data ->
+            markSocketSeen()
+            (data as? JSONObject)?.let { onCalComplete(it) }
+        }
+        PiSocketManager.on("cal_error") { data ->
+            markSocketSeen()
+            val msg = (data as? JSONObject)?.optString("message") ?: data.toString()
+            onCalError(msg)
+        }
+    }
+
+    private fun attachSocketLifecycleHooks() {
+        PiSocketManager.on("connect") { _ ->
+            runOnUi {
+                consecutiveStatusFailures = 0
+                markSocketSeen()
+                updatePiConnectionIndicator(true)
+                cancelPendingDisconnect()
+            }
+        }
+        PiSocketManager.on("disconnect") { _ ->
+            // Debounce instead of instant flip
+            scheduleDebouncedDisconnect()
+        }
+        PiSocketManager.on("connect_error") { _ ->
+            scheduleDebouncedDisconnect()
+        }
+        PiSocketManager.on("error") { _ ->
+            scheduleDebouncedDisconnect()
+        }
+    }
+
     private fun onCalProgress(data: JSONObject) {
         controlViewModel.updateCalibrationProgress(
             channelIndex = data.optInt("channel_index", 0),
@@ -335,8 +595,7 @@ class ControlFragment : Fragment() {
         val ledNorms: List<Double> =
             if (normsArr != null && normsArr.length() == 16)
                 (0 until normsArr.length()).map { i -> normsArr.optDouble(i, 1.0) }
-            else
-                emptyList()
+            else emptyList()
 
         if (ledNorms.size == 16) {
             val prefs = requireActivity().getSharedPreferences("APP_SETTINGS", Context.MODE_PRIVATE)
@@ -353,7 +612,7 @@ class ControlFragment : Fragment() {
             val roiH = prefs.getFloat("roi_h", 0.65f)
             val target = prefs.getFloat("cal_target", 0.80f)
 
-            val name = "Calibration • " + SimpleDateFormat("yyyy-MM-dd HH:mm").format(Date())
+            val name = "Calibration • " + SimpleDateFormat("dd-MM-yyyy HH:mm").format(Date())
             val summary = buildString {
                 append(if (ledNorms.size == 16) "16 LED norms saved" else "No norms returned")
                 append(" • target=").append(String.format("%.2f", target))
@@ -378,9 +637,9 @@ class ControlFragment : Fragment() {
             controlViewModel.completeCalibration(ledNorms)
 
             if (isAdded) {
-                requireActivity().runOnUiThread {
+                runOnUi {
                     Toast.makeText(requireContext(), "Calibration complete", Toast.LENGTH_SHORT).show()
-                    showCalUi(start = false)
+                    showCalUi(false)
                     setUiBusy(false)
                 }
             }
@@ -388,70 +647,17 @@ class ControlFragment : Fragment() {
         }
     }
 
-    private fun hookCalibrationEventsOnce() {
-        if (calHandlersRegistered) return
-        calHandlersRegistered = true
-
-        PiSocketManager.on("cal_progress") { data ->
-            (data as? JSONObject)?.let { onCalProgress(it) }
-        }
-        PiSocketManager.on("cal_complete") { data ->
-            (data as? JSONObject)?.let { onCalComplete(it) }
-        }
-        PiSocketManager.on("cal_error") { data ->
-            val msg = (data as? JSONObject)?.optString("message") ?: data.toString()
-            onCalError(msg)
-        }
-    }
-
     private fun onCalError(message: String) {
         controlViewModel.failCalibration()
         if (!isAdded) return
-        requireActivity().runOnUiThread {
+        runOnUi {
             Toast.makeText(requireContext(), "Calibration error: $message", Toast.LENGTH_LONG).show()
-            showCalUi(start = false)
+            showCalUi(false)
             setUiBusy(false)
         }
     }
 
-    // =========================
-    // Shutdown
-    // =========================
-
-    private fun setupShutdownButtonListener() {
-        binding.buttonShutdown.setOnClickListener {
-            if (currentIp.isEmpty()) {
-                Toast.makeText(requireContext(), "Set IP address first", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            AlertDialog.Builder(requireContext())
-                .setTitle("Shutdown System")
-                .setMessage("Are you sure you want to shut down the Pi and instrument?")
-                .setPositiveButton("Shutdown") { _, _ -> sendShutdownCommand() }
-                .setNegativeButton("Cancel", null)
-                .show()
-        }
-    }
-
-    private fun sendShutdownCommand() {
-        lifecycleScope.launch {
-            try {
-                val response = PiApiService.api.shutdownSystem()
-                if (response.isSuccessful) {
-                    Toast.makeText(requireContext(), "Shutdown command sent", Toast.LENGTH_SHORT).show()
-                } else {
-                    Toast.makeText(requireContext(), "Failed: ${response.code()}", Toast.LENGTH_SHORT).show()
-                }
-            } catch (e: Exception) {
-                Toast.makeText(requireContext(), "Network error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
-            }
-        }
-    }
-
-    // =========================
-    // Switches / Buttons
-    // =========================
-
+    // ---------- trigger / preview / progress ----------
     private fun setupSwitchListeners() {
         cameraPreviewListener = CompoundButton.OnCheckedChangeListener { _, isChecked ->
             val vmCal = controlViewModel.isCalibrating.value == true
@@ -467,13 +673,6 @@ class ControlFragment : Fragment() {
 
     private fun setupButtonListeners() {
         binding.button1.setOnClickListener { onSW2Pressed() }
-    }
-
-    private fun turnOffSW4() {
-        binding.switchCameraPreview.setOnCheckedChangeListener(null)
-        if (binding.switchCameraPreview.isChecked) triggerButton("SW4")
-        binding.switchCameraPreview.isChecked = false
-        binding.switchCameraPreview.setOnCheckedChangeListener(cameraPreviewListener)
     }
 
     private fun onSW2Pressed() {
@@ -493,9 +692,24 @@ class ControlFragment : Fragment() {
         controlViewModel.isCapturing.value = true
     }
 
-    // =========================
-    // Preview helpers
-    // =========================
+    private fun triggerButton(buttonId: String) {
+        if (currentIp.isEmpty()) {
+            Toast.makeText(requireContext(), "Set IP address first", Toast.LENGTH_SHORT).show()
+            return
+        }
+        lifecycleScope.launch {
+            try {
+                val resp = PiApiService.api.triggerScript(buttonId)
+                if (!resp.isSuccessful) {
+                    Toast.makeText(requireContext(), "Failed to trigger $buttonId", Toast.LENGTH_SHORT).show()
+                }
+            } catch (e: Exception) {
+                if (e !is SocketTimeoutException) {
+                    Toast.makeText(requireContext(), "Network error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
 
     private fun startImagePreview() {
         clearPreview()
@@ -512,10 +726,13 @@ class ControlFragment : Fragment() {
 
         imageGrid = GridLayout(requireContext()).apply {
             rowCount = 4; columnCount = 4
-            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            )
         }
         capturedImageViews.clear()
-        for (i in 0 until 16) {
+        repeat(16) {
             val img = ImageView(requireContext()).apply {
                 setImageResource(android.R.drawable.ic_menu_gallery)
                 scaleType = ImageView.ScaleType.CENTER_CROP
@@ -564,9 +781,16 @@ class ControlFragment : Fragment() {
         previewContainer.addView(liveFeedImageView)
     }
 
-    fun decodeBase64ImageToBitmap(imageB64: String): Bitmap? = try {
-        val imageBytes = Base64.decode(imageB64, Base64.DEFAULT)
-        BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
+    private fun turnOffSW4() {
+        binding.switchCameraPreview.setOnCheckedChangeListener(null)
+        if (binding.switchCameraPreview.isChecked) triggerButton("SW4")
+        binding.switchCameraPreview.isChecked = false
+        binding.switchCameraPreview.setOnCheckedChangeListener(cameraPreviewListener)
+    }
+
+    private fun decodeBase64ImageToBitmap(imageB64: String): Bitmap? = try {
+        val bytes = Base64.decode(imageB64, Base64.DEFAULT)
+        BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
     } catch (_: Exception) { null }
 
     private fun clearPreview() {
@@ -615,178 +839,46 @@ class ControlFragment : Fragment() {
         }
     }
 
-    // =========================
-    // Network helpers
-    // =========================
-
+    // ---------- enable/disable logic ----------
     private fun setUiBusy(busy: Boolean) {
         val calibrating = controlViewModel.isCalibrating.value == true
         val capturing = isCaptureOngoing
         val connected = isPiConnected
 
-        // General controls (SW2 capture, SW4 preview, shutdown)
         val controlsEnabled = connected && !busy && !calibrating && !capturing
         binding.switchCameraPreview.isEnabled = controlsEnabled
-        binding.button1.isEnabled = controlsEnabled           // SW2
+        binding.button1.isEnabled = controlsEnabled
         binding.buttonShutdown.isEnabled = controlsEnabled
 
-        // Calibrate button: only when connected and nothing else is running
         binding.buttonCalibrate.isEnabled = connected && !capturing && !calibrating && !busy
 
-        // Connection UI (Connect/Set IP, Disconnect, and IP text):
-        //  - Disable during CAPTURE or CALIBRATION (and any explicit busy)
-        val connectionControlsEnabled = !capturing && !calibrating && !busy
-        binding.buttonDisconnect.isEnabled = connectionControlsEnabled
-        binding.setIpButton.isEnabled = connectionControlsEnabled
-        binding.ipAddressInput.isEnabled = connectionControlsEnabled
+        val connectionControlsIdle = !capturing && !calibrating
+        binding.setIpButton.isEnabled = connectionControlsIdle && !connected && !isConnecting
+        binding.ipAddressInput.isEnabled = connectionControlsIdle && !connected && !isConnecting
+        binding.buttonDisconnect.isEnabled = connectionControlsIdle && connected
     }
 
-
-
-
-    private fun triggerButton(buttonId: String) {
-        if (currentIp.isEmpty()) {
-            Toast.makeText(requireContext(), "Set IP address first", Toast.LENGTH_SHORT).show()
-            return
-        }
-        lifecycleScope.launch {
-            try {
-                val response = PiApiService.api.triggerScript(buttonId)
-                if (!response.isSuccessful) {
-                    Toast.makeText(requireContext(), "Failed to trigger $buttonId", Toast.LENGTH_SHORT).show()
-                }
-            } catch (e: Exception) {
-                if (e !is SocketTimeoutException) {
-                    Toast.makeText(requireContext(), "Network error: ${e.localizedMessage}", Toast.LENGTH_SHORT).show()
-                }
-            }
-        }
-    }
-
-    private fun setupIpButtonListener() {
-        binding.setIpButton.setOnClickListener {
-            val enteredIp = binding.ipAddressInput.text.toString().trim()
-            if (enteredIp.isNotEmpty()) {
-                currentIp = enteredIp
-                PiApiService.setBaseUrl(enteredIp)
-                saveIpToPrefs(enteredIp)
-                checkPiConnection(enteredIp)
-
-                PiSocketManager.connect(currentIp, ::onPreviewImageEvent, ::onPiStateUpdate)
-                hookCalibrationEventsOnce()
-            } else {
-                updatePiConnectionIndicator(null)
-            }
-        }
-    }
-
-    private fun saveIpToPrefs(ip: String) {
-        val prefs = requireActivity().getSharedPreferences("APP_SETTINGS", Context.MODE_PRIVATE)
-        prefs.edit().putString("server_ip", ip).apply()
-    }
-
-    private fun restoreSavedIp() {
-        val prefs = requireActivity().getSharedPreferences("APP_SETTINGS", Context.MODE_PRIVATE)
-        val savedIp = prefs.getString("server_ip", "") ?: ""
-        if (savedIp.isNotEmpty()) {
-            currentIp = savedIp
-            binding.ipAddressInput.setText(savedIp)
-            PiApiService.setBaseUrl(savedIp)
-            PiSocketManager.connect(currentIp, ::onPreviewImageEvent, ::onPiStateUpdate)
-            hookCalibrationEventsOnce()
-        }
-    }
-
-    private fun checkPiConnection(ip: String) {
-        val client = OkHttpClient()
-        val request = Request.Builder().url("http://$ip:5000/status").get().build()
-        client.newCall(request).enqueue(object : okhttp3.Callback {
-            override fun onFailure(call: okhttp3.Call, e: IOException) {
-                if (isAdded) requireActivity().runOnUiThread { updatePiConnectionIndicator(false) }
-            }
-            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
-                if (isAdded) requireActivity().runOnUiThread { updatePiConnectionIndicator(response.isSuccessful) }
-            }
-        })
-    }
-
-    private fun updatePiConnectionIndicator(connected: Boolean?) {
-        val statusDrawable = when (connected) {
-            true -> R.drawable.circle_green
-            false -> R.drawable.circle_red
-            null -> R.drawable.circle_grey
-        }
-        binding.piConnectionStatus.text = when (connected) {
-            true -> "Status: Connected"
-            false -> "Status: Not Connected"
-            null -> "Status: Unknown"
-        }
-        binding.piConnectionDot.background =
-            ContextCompat.getDrawable(requireContext(), statusDrawable)
-
-        isPiConnected = (connected == true)
-
-        val operationBusy = isCaptureOngoing || (controlViewModel.isCalibrating.value == true)
-        setUiBusy(operationBusy)
-    }
-
-    // =========================
-    // Lifecycle
-    // =========================
-
-    override fun onDestroyView() {
-        _binding = null
-        clearPreview()
-        super.onDestroyView()
-    }
-
-    override fun onResume() {
-        super.onResume()
-        startAutoConnectionCheck()
-        if (currentIp.isNotEmpty()) {
-            PiSocketManager.emit("get_state", JSONObject())
-        }
-    }
-
-    override fun onPause() {
-        super.onPause()
-        stopAutoConnectionCheck()
-    }
-
-    private fun startAutoConnectionCheck() {
-        stopAutoConnectionCheck()
-        connectionCheckRunnable = object : Runnable {
-            override fun run() {
-                if (currentIp.isNotEmpty()) checkPiConnection(currentIp) else updatePiConnectionIndicator(null)
-                connectionCheckHandler.postDelayed(this, refreshIntervalMs)
-            }
-        }
-        connectionCheckHandler.post(connectionCheckRunnable!!)
-    }
-
-    private fun stopAutoConnectionCheck() {
-        connectionCheckRunnable?.let { connectionCheckHandler.removeCallbacks(it) }
-    }
-
-    // =========================
-    // Socket handlers
-    // =========================
-
+    // ---------- socket handlers ----------
     private fun onPreviewImageEvent(data: JSONObject, bitmap: Bitmap) {
-        Log.d("ControlFragment", "onPreviewImageEvent called. Bitmap: $bitmap, Size: ${bitmap.width}x${bitmap.height}")
+        markSocketSeen()
+        cancelPendingDisconnect()
+        Log.d("ControlFragment", "onPreviewImageEvent: ${bitmap.width}x${bitmap.height}")
+        if (!isAdded) return
         if (currentPreviewMode == PreviewMode.LIVE_FEED) {
-            requireActivity().runOnUiThread { liveFeedImageView?.setImageBitmap(bitmap) }
+            runOnUi { liveFeedImageView?.setImageBitmap(bitmap) }
         }
         val idx = data.optInt("index", -1)
         if (idx in 0 until 16) {
-            requireActivity().runOnUiThread { controlViewModel.addBitmap(idx, bitmap) }
+            runOnUi { controlViewModel.addBitmap(idx, bitmap) }
         }
     }
 
     private fun onPiStateUpdate(data: JSONObject) {
+        markSocketSeen()
+        cancelPendingDisconnect()
         Log.d("ControlFragment", "onPiStateUpdate: $data")
-        val binding = _binding ?: return
-        requireActivity().runOnUiThread {
+        val b = _binding ?: return
+        runOnUi {
             val sw4 = data.optBoolean("sw4", false)
             val busyFromPi = data.optBoolean("busy", false)
             val calFromPi = data.optBoolean("calibrating", false)
@@ -795,14 +887,14 @@ class ControlFragment : Fragment() {
             controlViewModel.isCalibrating.value =
                 calFromPi || (controlViewModel.isCalibrating.value == true)
 
-            binding.switchCameraPreview.setOnCheckedChangeListener(null)
-            binding.switchCameraPreview.isChecked = sw4
-            binding.switchCameraPreview.setOnCheckedChangeListener(cameraPreviewListener)
+            b.switchCameraPreview.setOnCheckedChangeListener(null)
+            b.switchCameraPreview.isChecked = sw4
+            b.switchCameraPreview.setOnCheckedChangeListener(cameraPreviewListener)
 
             val shouldDisableUi = isCaptureOngoing || busyFromPi || (controlViewModel.isCalibrating.value == true)
             setUiBusy(shouldDisableUi)
 
-            if (!lastButton.isNullOrBlank()) binding.lastPiButtonText.text = "Pi Button Pressed: $lastButton"
+            if (!lastButton.isNullOrBlank()) b.lastPiButtonText.text = "MSI Button Pressed: $lastButton"
 
             if (sw4 && currentPreviewMode != PreviewMode.LIVE_FEED) startLiveFeedPreview()
             else if (!sw4 && currentPreviewMode == PreviewMode.LIVE_FEED) clearPreview()
@@ -820,10 +912,7 @@ class ControlFragment : Fragment() {
         }
     }
 
-    // =========================
-    // Save session
-    // =========================
-
+    // ---------- save session ----------
     private fun saveSessionToDatabase(bitmaps: List<Bitmap?>) {
         lifecycleScope.launch {
             val context = requireContext().applicationContext
@@ -841,7 +930,9 @@ class ControlFragment : Fragment() {
 
             val location = getLastKnownLocationString(context)
             val session = Session(timestamp = timestamp, location = location, imagePaths = imagePaths)
-            AppDatabase.getDatabase(context).sessionDao().insert(session)
+            withContext(Dispatchers.IO) {
+                AppDatabase.getDatabase(context).sessionDao().insert(session)
+            }
 
             withContext(Dispatchers.Main) {
                 binding.captureProgressText.text = "All images received!"
@@ -862,5 +953,11 @@ class ControlFragment : Fragment() {
                 controlViewModel.capturedBitmaps.value = MutableList(16) { null }
             }
         }
+    }
+
+    // ---------- utils ----------
+    private fun runOnUi(block: () -> Unit) {
+        if (!isAdded) return
+        requireActivity().runOnUiThread(block)
     }
 }
