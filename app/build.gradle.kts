@@ -37,10 +37,12 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
     implementation ("io.socket:socket.io-client:2.0.1")
-
+    implementation ("androidx.exifinterface:exifinterface:1.3.7")
     // Navigation
     implementation("androidx.navigation:navigation-fragment-ktx:2.7.7")
     implementation("androidx.navigation:navigation-ui-ktx:2.7.7")
+    implementation("org.jetbrains.kotlin:kotlin-reflect:1.9.24")
+
 
     // Lifecycle & ViewModel
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.0")

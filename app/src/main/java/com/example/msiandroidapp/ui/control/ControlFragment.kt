@@ -73,15 +73,11 @@ class ControlFragment : Fragment() {
     private var isPiConnected = false
     private var isCaptureOngoing = false
 
-    // Switch listeners
-    private var ledWarmingListener: CompoundButton.OnCheckedChangeListener? = null
     private var cameraPreviewListener: CompoundButton.OnCheckedChangeListener? = null
 
-    // Deduplicate calibration event handlers and saves
     private var calHandlersRegistered = false
     @Volatile private var calSaveInFlight = false
 
-    // JSON media type
     private val JSON = "application/json; charset=utf-8".toMediaType()
 
     override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
@@ -97,6 +93,7 @@ class ControlFragment : Fragment() {
         setupSwitchListeners()
         setupButtonListeners()
         setupIpButtonListener()
+        setupDisconnectButtonListener() // <-- NEW
         setupShutdownButtonListener()
         setupProgressBar()
         setupProgressObserver()
@@ -126,9 +123,7 @@ class ControlFragment : Fragment() {
         }
 
         // Observers for capture
-        controlViewModel.capturedBitmaps.observe(viewLifecycleOwner) {
-            updateImageGrid(it ?: List(16) { null })
-        }
+        controlViewModel.capturedBitmaps.observe(viewLifecycleOwner) { updateImageGrid(it ?: List(16) { null }) }
         controlViewModel.imageCount.observe(viewLifecycleOwner) { count2 ->
             binding.captureProgressBar.progress = count2
             binding.captureProgressText.text = "Receiving images: $count2/16"
@@ -156,6 +151,47 @@ class ControlFragment : Fragment() {
     }
 
     // =========================
+    // Disconnect (does NOT clear IP text or prefs)
+    // =========================
+
+    private fun setupDisconnectButtonListener() {
+        val btn = binding.buttonDisconnect
+        btn.setOnClickListener {
+            performDisconnect()
+        }
+    }
+
+    private fun performDisconnect() {
+        // Stop periodic checks
+        stopAutoConnectionCheck()
+
+        // Stop previews
+        turnOffSW4()
+        clearPreview()
+
+        // Reset op flags
+        isCaptureOngoing = false
+        controlViewModel.isCapturing.value = false
+        controlViewModel.imageCount.value = 0
+        controlViewModel.isCalibrating.value = false
+
+        // Close socket connection safely
+        try {
+            PiSocketManager.disconnect()
+        } catch (_: Exception) { /* ignore */ }
+
+        // DO NOT clear currentIp or the EditText
+        // DO NOT clear saved prefs
+        isPiConnected = false
+        updatePiConnectionIndicator(false)
+
+        // Keep IP fields editable so user can reconnect
+        setUiBusy(false)
+
+        Toast.makeText(requireContext(), "Disconnected from Pi", Toast.LENGTH_SHORT).show()
+    }
+
+    // =========================
     // Calibration UI + actions
     // =========================
 
@@ -173,15 +209,6 @@ class ControlFragment : Fragment() {
             }
             startCalibration()
         }
-
-        binding.buttonCancelCal.setOnClickListener {
-            val vmCal = controlViewModel.isCalibrating.value == true
-            if (!vmCal) {
-                Toast.makeText(requireContext(), "Calibration not running", Toast.LENGTH_SHORT).show()
-                return@setOnClickListener
-            }
-            cancelCalibration()
-        }
     }
 
     private fun setupCalibrationObservers() {
@@ -189,7 +216,6 @@ class ControlFragment : Fragment() {
             val busy = isCaptureOngoing || calibrating || !isPiConnected
             setUiBusy(busy)
             binding.buttonCalibrate.isEnabled = isPiConnected && !isCaptureOngoing && !calibrating
-            binding.buttonCancelCal.isEnabled = isPiConnected && calibrating
             if (!calibrating) {
                 binding.calProgressBar.visibility = View.GONE
                 binding.calProgressText.visibility = View.GONE
@@ -277,31 +303,6 @@ class ControlFragment : Fragment() {
         }
     }
 
-    private fun cancelCalibration() {
-        if (currentIp.isEmpty()) {
-            Toast.makeText(requireContext(), "Set IP address first", Toast.LENGTH_SHORT).show()
-            return
-        }
-        lifecycleScope.launch {
-            try {
-                val code = withContext(Dispatchers.IO) {
-                    val client = OkHttpClient()
-                    val req = Request.Builder()
-                        .url("http://$currentIp:5000/calibrate/cancel")
-                        .post("".toRequestBody(JSON))
-                        .build()
-                    client.newCall(req).execute().use { it.code }
-                }
-                if (code !in 200..299) {
-                    Toast.makeText(requireContext(), "Cancel failed ($code)", Toast.LENGTH_SHORT).show()
-                }
-            } catch (e: Exception) {
-                val msg = e.localizedMessage ?: e::class.java.simpleName
-                Toast.makeText(requireContext(), "Network error: $msg", Toast.LENGTH_LONG).show()
-            }
-        }
-    }
-
     private fun showCalUi(start: Boolean) {
         if (start) {
             binding.calProgressBar.progress = 0
@@ -327,7 +328,6 @@ class ControlFragment : Fragment() {
     }
 
     private fun onCalComplete(data: JSONObject) {
-        // prevent duplicate inserts if handler somehow fires twice
         if (calSaveInFlight) return
         calSaveInFlight = true
 
@@ -453,14 +453,6 @@ class ControlFragment : Fragment() {
     // =========================
 
     private fun setupSwitchListeners() {
-        ledWarmingListener = CompoundButton.OnCheckedChangeListener { _, _ ->
-            val vmCal = controlViewModel.isCalibrating.value == true
-            if (!isPiConnected || isCaptureOngoing || vmCal) {
-                binding.switchLedWarming.isChecked = false
-                return@OnCheckedChangeListener
-            }
-            triggerButton("SW3")
-        }
         cameraPreviewListener = CompoundButton.OnCheckedChangeListener { _, isChecked ->
             val vmCal = controlViewModel.isCalibrating.value == true
             if (!isPiConnected || isCaptureOngoing || vmCal) {
@@ -470,7 +462,6 @@ class ControlFragment : Fragment() {
             triggerButton("SW4")
             if (isChecked) startLiveFeedPreview() else clearPreview()
         }
-        binding.switchLedWarming.setOnCheckedChangeListener(ledWarmingListener)
         binding.switchCameraPreview.setOnCheckedChangeListener(cameraPreviewListener)
     }
 
@@ -478,14 +469,10 @@ class ControlFragment : Fragment() {
         binding.button1.setOnClickListener { onSW2Pressed() }
     }
 
-    private fun turnOffSW3andSW4() {
-        binding.switchLedWarming.setOnCheckedChangeListener(null)
+    private fun turnOffSW4() {
         binding.switchCameraPreview.setOnCheckedChangeListener(null)
-        if (binding.switchLedWarming.isChecked) triggerButton("SW3")
         if (binding.switchCameraPreview.isChecked) triggerButton("SW4")
-        binding.switchLedWarming.isChecked = false
         binding.switchCameraPreview.isChecked = false
-        binding.switchLedWarming.setOnCheckedChangeListener(ledWarmingListener)
         binding.switchCameraPreview.setOnCheckedChangeListener(cameraPreviewListener)
     }
 
@@ -495,7 +482,7 @@ class ControlFragment : Fragment() {
             Toast.makeText(requireContext(), "Pi not connected or busy", Toast.LENGTH_SHORT).show()
             return
         }
-        turnOffSW3andSW4()
+        turnOffSW4()
         if (currentPreviewMode != PreviewMode.IMAGE_CAPTURE) startImagePreview()
         startCaptureProgress()
         isCaptureOngoing = true
@@ -633,21 +620,29 @@ class ControlFragment : Fragment() {
     // =========================
 
     private fun setUiBusy(busy: Boolean) {
-        val isCal = controlViewModel.isCalibrating.value == true
+        val calibrating = controlViewModel.isCalibrating.value == true
+        val capturing = isCaptureOngoing
         val connected = isPiConnected
 
-        val controlsEnabled = connected && !busy
-        binding.switchLedWarming.isEnabled = controlsEnabled
+        // General controls (SW2 capture, SW4 preview, shutdown)
+        val controlsEnabled = connected && !busy && !calibrating && !capturing
         binding.switchCameraPreview.isEnabled = controlsEnabled
-        binding.button1.isEnabled = controlsEnabled
+        binding.button1.isEnabled = controlsEnabled           // SW2
         binding.buttonShutdown.isEnabled = controlsEnabled
-        binding.buttonCalibrate.isEnabled = connected && !busy && !isCal
-        binding.buttonCancelCal.isEnabled = connected && isCal
 
-        val ipFieldsEnabled = !busy
-        binding.setIpButton.isEnabled = ipFieldsEnabled
-        binding.ipAddressInput.isEnabled = ipFieldsEnabled
+        // Calibrate button: only when connected and nothing else is running
+        binding.buttonCalibrate.isEnabled = connected && !capturing && !calibrating && !busy
+
+        // Connection UI (Connect/Set IP, Disconnect, and IP text):
+        //  - Disable during CAPTURE or CALIBRATION (and any explicit busy)
+        val connectionControlsEnabled = !capturing && !calibrating && !busy
+        binding.buttonDisconnect.isEnabled = connectionControlsEnabled
+        binding.setIpButton.isEnabled = connectionControlsEnabled
+        binding.ipAddressInput.isEnabled = connectionControlsEnabled
     }
+
+
+
 
     private fun triggerButton(buttonId: String) {
         if (currentIp.isEmpty()) {
@@ -792,7 +787,6 @@ class ControlFragment : Fragment() {
         Log.d("ControlFragment", "onPiStateUpdate: $data")
         val binding = _binding ?: return
         requireActivity().runOnUiThread {
-            val sw3 = data.optBoolean("sw3", false)
             val sw4 = data.optBoolean("sw4", false)
             val busyFromPi = data.optBoolean("busy", false)
             val calFromPi = data.optBoolean("calibrating", false)
@@ -801,11 +795,8 @@ class ControlFragment : Fragment() {
             controlViewModel.isCalibrating.value =
                 calFromPi || (controlViewModel.isCalibrating.value == true)
 
-            binding.switchLedWarming.setOnCheckedChangeListener(null)
             binding.switchCameraPreview.setOnCheckedChangeListener(null)
-            binding.switchLedWarming.isChecked = sw3
             binding.switchCameraPreview.isChecked = sw4
-            binding.switchLedWarming.setOnCheckedChangeListener(ledWarmingListener)
             binding.switchCameraPreview.setOnCheckedChangeListener(cameraPreviewListener)
 
             val shouldDisableUi = isCaptureOngoing || busyFromPi || (controlViewModel.isCalibrating.value == true)
@@ -817,7 +808,7 @@ class ControlFragment : Fragment() {
             else if (!sw4 && currentPreviewMode == PreviewMode.LIVE_FEED) clearPreview()
 
             if (lastButton == "SW2" && !isCaptureOngoing) {
-                turnOffSW3andSW4()
+                turnOffSW4()
                 if (currentPreviewMode != PreviewMode.IMAGE_CAPTURE) startImagePreview()
                 startCaptureProgress()
                 isCaptureOngoing = true

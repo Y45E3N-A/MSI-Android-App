@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout
+    xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/root_container"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
@@ -21,29 +23,79 @@
             android:padding="16dp"
             android:gravity="center_horizontal">
 
-            <!-- System / Network -->
-            <Button
-                android:id="@+id/buttonShutdown"
+            <!-- System / Network row -->
+            <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="Shutdown"
-                android:layout_marginBottom="12dp"/>
+                android:orientation="horizontal"
+                android:gravity="center"
+                android:layout_marginBottom="12dp">
 
-            <EditText
-                android:id="@+id/ipAddressInput"
+                <Button
+                    android:id="@+id/buttonShutdown"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Shutdown" />
+
+                <Space
+                    android:layout_width="12dp"
+                    android:layout_height="1dp" />
+
+                <Button
+                    android:id="@+id/buttonCalibrate"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Calibrate" />
+            </LinearLayout>
+
+            <!-- Permanent label + editable IP (prefix is uneditable) -->
+            <com.google.android.material.textfield.TextInputLayout
+                android:id="@+id/ipInputLayout"
+                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:hint="Enter Pi IP Address"
-                android:inputType="text"
-                android:layout_marginBottom="12dp" />
+                android:layout_marginBottom="12dp"
+                app:boxBackgroundMode="outline"
+                app:prefixText="Set IP Address: ">
 
-            <Button
-                android:id="@+id/setIpButton"
-                android:layout_width="wrap_content"
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/ipAddressInput"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:inputType="textNoSuggestions"
+                    android:singleLine="true"
+                    android:hint="e.g. 192.168.4.1"
+                    android:contentDescription="IP address input"/>
+            </com.google.android.material.textfield.TextInputLayout>
+
+            <!-- Connect + Disconnect row -->
+            <LinearLayout
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Set IP Address"
-                android:layout_marginBottom="12dp" />
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="12dp">
 
+                <Button
+                    android:id="@+id/setIpButton"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Connect" />
+
+                <Space
+                    android:layout_width="12dp"
+                    android:layout_height="1dp" />
+
+                <Button
+                    android:id="@+id/buttonDisconnect"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Disconnect" />
+            </LinearLayout>
+
+            <!-- Connection indicator -->
             <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -56,13 +108,14 @@
                     android:layout_width="16dp"
                     android:layout_height="16dp"
                     android:background="@drawable/circle_grey"
-                    android:layout_marginEnd="8dp"/>
+                    android:layout_marginEnd="8dp" />
+
                 <TextView
                     android:id="@+id/piConnectionStatus"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:text="Status: Unknown"
-                    android:textSize="16sp"/>
+                    android:textSize="16sp" />
             </LinearLayout>
 
             <TextView
@@ -79,15 +132,6 @@
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="Start Capture"
-                android:layout_marginBottom="12dp" />
-
-            <Switch
-                android:id="@+id/switch_led_warming"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="LED Warming"
-                android:textOn="LED Warming ON"
-                android:textOff="LED Warming OFF"
                 android:layout_marginBottom="12dp" />
 
             <Switch
@@ -113,45 +157,9 @@
                 android:layout_height="wrap_content"
                 android:text=""
                 android:visibility="gone"
-                android:layout_marginBottom="20dp"/>
+                android:layout_marginBottom="20dp" />
 
-            <!-- Calibration section -->
-            <TextView
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Calibration"
-                android:textStyle="bold"
-                android:textSize="16sp"
-                android:layout_marginTop="8dp"
-                android:layout_marginBottom="8dp"/>
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:layout_marginBottom="12dp">
-
-                <Button
-                    android:id="@+id/buttonCalibrate"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Calibrate"/>
-
-                <Space
-                    android:layout_width="12dp"
-                    android:layout_height="1dp" />
-
-                <Button
-                    android:id="@+id/buttonCancelCal"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Cancel"
-                    android:enabled="false"/>
-            </LinearLayout>
-
+            <!-- Calibration progress -->
             <ProgressBar
                 android:id="@+id/calProgressBar"
                 style="?android:attr/progressBarStyleHorizontal"
