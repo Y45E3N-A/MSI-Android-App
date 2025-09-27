@@ -1,13 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<LinearLayout
-    xmlns:android="http://schemas.android.com/apk/res/android"
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:id="@+id/root_container"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical">
 
-    <!-- Controls Section (top half) -->
+    <!-- Controls (top) -->
     <ScrollView
         android:id="@+id/controls_scrollview"
         android:layout_width="match_parent"
@@ -23,7 +22,7 @@
             android:padding="16dp"
             android:gravity="center_horizontal">
 
-            <!-- System / Network row -->
+            <!-- Power / Calibrate -->
             <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -37,9 +36,7 @@
                     android:layout_height="wrap_content"
                     android:text="Shutdown" />
 
-                <Space
-                    android:layout_width="12dp"
-                    android:layout_height="1dp" />
+                <Space android:layout_width="12dp" android:layout_height="1dp"/>
 
                 <Button
                     android:id="@+id/buttonCalibrate"
@@ -48,7 +45,7 @@
                     android:text="Calibrate" />
             </LinearLayout>
 
-            <!-- Permanent label + editable IP (prefix is uneditable) -->
+            <!-- IP entry -->
             <com.google.android.material.textfield.TextInputLayout
                 android:id="@+id/ipInputLayout"
                 style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
@@ -65,12 +62,12 @@
                     android:hint="e.g. 192.168.4.1"
                     android:singleLine="true"
                     android:imeOptions="actionDone"
-                    android:inputType="numberDecimal"
+                    android:inputType="numberDecimal|number"
                     android:digits="0123456789."
                     android:contentDescription="IP address input"/>
             </com.google.android.material.textfield.TextInputLayout>
 
-            <!-- Connect + Disconnect row -->
+            <!-- Connect / Disconnect -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -85,9 +82,7 @@
                     android:layout_weight="1"
                     android:text="Connect" />
 
-                <Space
-                    android:layout_width="12dp"
-                    android:layout_height="1dp" />
+                <Space android:layout_width="12dp" android:layout_height="1dp"/>
 
                 <Button
                     android:id="@+id/buttonDisconnect"
@@ -128,14 +123,15 @@
                 android:textSize="18sp"
                 android:layout_marginBottom="20dp" />
 
-            <!-- Capture controls -->
+            <!-- AMSI -->
             <Button
-                android:id="@+id/button1"
+                android:id="@+id/buttonStartAmsi"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Start Capture"
+                android:text="Start AMSI"
                 android:layout_marginBottom="12dp" />
 
+            <!-- Live preview -->
             <Switch
                 android:id="@+id/switch_camera_preview"
                 android:layout_width="match_parent"
@@ -145,6 +141,7 @@
                 android:textOff="Camera Preview OFF"
                 android:layout_marginBottom="16dp" />
 
+            <!-- AMSI progress -->
             <ProgressBar
                 android:id="@+id/captureProgressBar"
                 style="?android:attr/progressBarStyleHorizontal"
@@ -176,10 +173,70 @@
                 android:layout_height="wrap_content"
                 android:text=""
                 android:visibility="gone" />
+
+            <!-- PMFI (INI-only) -->
+            <TextView
+                android:id="@+id/pmfiHeader"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text="PMFI (INI only)"
+                android:textStyle="bold"
+                android:textSize="18sp"
+                android:layout_marginTop="16dp"
+                android:layout_marginBottom="6dp"/>
+
+            <EditText
+                android:id="@+id/pmfiIniEdit"
+                android:layout_width="match_parent"
+                android:layout_height="140dp"
+                android:gravity="top|start"
+                android:hint="Paste your [pmfi] INI here"
+                android:inputType="textMultiLine"
+                android:overScrollMode="always"
+                android:scrollbars="vertical" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:layout_marginTop="8dp">
+
+                <Button
+                    android:id="@+id/pmfiUploadIniBtn"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Upload INI" />
+
+                <Space android:layout_width="8dp" android:layout_height="1dp"/>
+
+                <Button
+                    android:id="@+id/pmfiStartBtn"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="Start PMFI"
+                    android:enabled="false" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/pmfiStatusText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:paddingTop="6dp"
+                android:textIsSelectable="true"/>
+            <ProgressBar
+                android:id="@+id/pmfiProgressBar"
+                style="?android:attr/progressBarStyleHorizontal"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:visibility="gone"/>
+
         </LinearLayout>
     </ScrollView>
 
-    <!-- Preview Section (bottom half), scrollable and padded for bottom nav -->
+    <!-- Preview (bottom) -->
     <ScrollView
         android:id="@+id/preview_scrollview"
         android:layout_width="match_parent"

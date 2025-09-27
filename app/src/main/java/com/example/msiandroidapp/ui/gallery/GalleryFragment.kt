@@ -603,7 +603,7 @@ class GalleryFragment : Fragment() {
 
     private fun buildImageFileNameForShare(index: Int): String {
         val wl = wavelengthForIndex(index)
-        return if (wl != null) "Wavelength_${wl}nm.jpg" else "Wavelength_unknown.jpg"
+        return if (wl != null) "Wavelength_${wl}nm.png" else "Wavelength_unknown.png"
     }
 
     private fun makeCalibrationJsonFile(profile: CalibrationProfile): File? = runCatching {
@@ -660,12 +660,16 @@ class GalleryFragment : Fragment() {
     }
 
     private fun stampExifToCopy(src: File, dst: File, session: Session, indexInSession: Int) {
+        // Copy original bytes to the .png-named temp file
         FileInputStream(src).use { input -> FileOutputStream(dst).use { output -> input.copyTo(output) } }
+
+        // Attach metadata (supported for PNG via XMP in ExifInterface)
         try {
             val exif = ExifInterface(dst.absolutePath)
             val dt = parseSessionDate(session.timestamp)
             val exifFormat = SimpleDateFormat("dd-MM-yyyy | HH:mm:ss", Locale.US)
             val dateStr = exifFormat.format(dt)
+
             exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, dateStr)
             exif.setAttribute(ExifInterface.TAG_DATETIME, dateStr)
 
@@ -685,6 +689,7 @@ class GalleryFragment : Fragment() {
             exif.saveAttributes()
         } catch (_: Exception) { }
     }
+
 
     private fun displayNameFor(session: Session?): String {
         if (session == null) return "Session ${System.currentTimeMillis()}"

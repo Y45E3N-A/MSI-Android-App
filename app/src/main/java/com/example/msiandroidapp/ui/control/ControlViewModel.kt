@@ -11,6 +11,11 @@ class ControlViewModel : ViewModel() {
     val imageCount = MutableLiveData(0)
     val isCapturing = MutableLiveData(false)
     val sessionComplete = MutableLiveData(false)
+    val pmfiTotalFrames = MutableLiveData(0)
+    val pmfiDoneFrames  = MutableLiveData(0)
+    val pmfiCurrentSection = MutableLiveData<String?>(null)
+    val pmfiFps = MutableLiveData<Double?>(null)
+    val pmfiEta = MutableLiveData<Int?>(null)
 
     fun addBitmap(idx: Int, bitmap: Bitmap) {
         val current = (capturedBitmaps.value ?: MutableList<Bitmap?>(16) { null }).toMutableList()

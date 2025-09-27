@@ -5,180 +5,340 @@ import android.location.Geocoder
 import android.util.Log
 import com.example.msiandroidapp.data.AppDatabase
 import com.example.msiandroidapp.data.Session
+import com.example.msiandroidapp.util.UploadProgressBus
+import com.google.android.gms.location.LocationServices
 import fi.iki.elonen.NanoHTTPD
 import kotlinx.coroutines.*
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.*
-import com.google.android.gms.location.LocationServices
-import com.example.msiandroidapp.util.UploadProgressBus
+import java.util.Collections.synchronizedList
+import java.util.concurrent.ConcurrentHashMap
+import java.util.zip.ZipFile
 
+/**
+ * Unified UploadServer
+ * - AMSI: POST /upload?sessionId=UUID  (16 PNGs -> finalise once)
+ * - PMFI (ZIP): POST /upload?sessionId=UUID&mode=pmfi  (filename.zip -> extract + finalise section)
+ * - PMFI (PNG stream, optional): POST /upload?sessionId=UUID&mode=pmfi  (PNGs stored; no auto-finalise)
+ *
+ * Notes:
+ * - We ONLY infer PMFI from explicit "mode=pmfi" (or header x-mode: pmfi). No filename heuristics.
+ * - Accepts /upload and /upload/ to avoid 404s from trailing slashes.
+ * - Does NOT override start(); start it from your ForegroundService once.
+ */
 class UploadServer(
-    private val port: Int,
-    private val storageDir: File,
+    port: Int,
+    baseStorageDir: File,
     private val context: Context
 ) : NanoHTTPD(port) {
 
-    private val sessionUploads = mutableMapOf<String, MutableList<String>>() // sessionId -> image paths
-    private val sessionTimestamps = mutableMapOf<String, Long>()
-    private val sessionInserted = mutableSetOf<String>() // Track completed sessions (avoid duplicates)
-    private val imagesPerSession = 16
-    private val sessionTimeoutMillis = 10 * 60 * 1000 // 10 minutes
+    private val TAG = "UploadServer"
+    // Thread-safe: tracks sessions already inserted into DB
+    private val dbInserted = Collections.synchronizedSet(mutableSetOf<String>())
 
+    // Root storage: if caller passed ".../Sessions", reuse; otherwise append "Sessions"
+    private val sessionsRoot: File = if (baseStorageDir.name.equals("Sessions", true)) {
+        baseStorageDir
+    } else {
+        File(baseStorageDir, "Sessions")
+    }.apply { mkdirs() }
+
+    // ---- AMSI constants/trackers ----
+    private val imagesPerAmsi = 16
+    private val sessionTimeoutMillis = 10 * 60 * 1000L // 10 minutes
+
+    // Thread-safe trackers
+    private val amsiUploads = ConcurrentHashMap<String, MutableList<String>>() // sessionId -> image paths
+    private val lastSeenAt = ConcurrentHashMap<String, Long>()                 // sessionId -> last timestamp
+    private val finalisedKeys = Collections.synchronizedSet(mutableSetOf<String>()) // keys we've finalised
+
+    // Coroutines for background tasks
+    private val job = SupervisorJob()
+    private val scope = CoroutineScope(Dispatchers.IO + job)
+
+    fun shutdown() {
+        try { closeAllConnections() } catch (_: Exception) {}
+        job.cancel()
+        stop()
+        Log.i(TAG, "UploadServer stopped.")
+    }
+
+    // ------------------------------------------------------------------------
+    // HTTP router
+    // ------------------------------------------------------------------------
     override fun serve(session: IHTTPSession): Response {
-        return when (session.method) {
-            Method.POST -> handlePost(session)
-            else -> newFixedLengthResponse(
-                Response.Status.METHOD_NOT_ALLOWED,
-                MIME_PLAINTEXT,
-                "Only POST allowed"
-            )
+        return try {
+            when (session.method) {
+                Method.GET  -> handleGet(session)
+                Method.POST -> handlePost(session)
+                else -> newFixedLengthResponse(
+                    Response.Status.METHOD_NOT_ALLOWED, MIME_PLAINTEXT, "Method not allowed"
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Serve error: ${e.message}", e)
+            newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Internal error")
+        }
+    }
+
+    private fun handleGet(session: IHTTPSession): Response {
+        return when (session.uri.orEmpty()) {
+            "/health" -> newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, "OK")
+            else      -> newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Not found")
         }
     }
 
     private fun handlePost(session: IHTTPSession): Response {
-        return try {
-            val files = HashMap<String, String>()
-            session.parseBody(files)
+        val uri = session.uri.orEmpty()
+        if (!(uri == "/upload" || uri == "/upload/")) {
+            return newFixedLengthResponse(Response.Status.NOT_FOUND, MIME_PLAINTEXT, "Unknown endpoint")
+        }
 
-            // Always use Pi-provided sessionId! (e.g. ?sessionId=123456 or header x-session-id)
-            val sessionId = session.parms["sessionId"]
-                ?: session.headers["x-session-id"]
-                ?: run {
-                    Log.e("UploadServer", "No sessionId provided! Rejecting upload.")
-                    return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "No sessionId provided")
-                }
+        val files = HashMap<String, String>()
+        session.parseBody(files) // NanoHTTPD writes multipart file to a temp path
 
-            val filename = session.headers["content-disposition"]?.let { extractFilename(it) }
-                ?: "upload_${System.currentTimeMillis()}.png"
+        // ---- Session Id ----
+        val sessionId = session.parms["sessionId"]
+            ?: session.headers["x-session-id"]
+            ?: return badRequest("No sessionId provided")
 
-            val fileKey = files.values.firstOrNull()
-            if (fileKey == null) {
-                Log.e("UploadServer", "No file received")
-                return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "No file received")
-            }
+        // ---- Mode ----
+        val isPmfi = session.parms["mode"]?.equals("pmfi", true) == true ||
+                session.headers["x-mode"]?.equals("pmfi", true) == true
 
-            val uploadedFile = File(fileKey)
-            val targetFile = File(storageDir, filename)
-            uploadedFile.copyTo(targetFile, overwrite = true)
-            uploadedFile.delete()
+        val tmpPath = files.values.firstOrNull() ?: return badRequest("No file received")
+        val incomingName = extractFilename(session.headers["content-disposition"])
+            ?: session.parms["filename"]
+            ?: "upload_${System.currentTimeMillis()}"
+        val safeName = File(incomingName).name // strip any paths
 
-            val now = System.currentTimeMillis()
+        lastSeenAt[sessionId] = System.currentTimeMillis()
 
-            // Track file and timestamp
-            val imagePaths = sessionUploads.getOrPut(sessionId) { mutableListOf() }
-            imagePaths.add(targetFile.absolutePath)
-            sessionTimestamps[sessionId] = now
+        // ZIPs are treated as PMFI sections (explicit mode only strongly recommended)
+        val isZip = safeName.lowercase(Locale.ROOT).endsWith(".zip")
+        val sectionParam = session.parms["section"]
 
-            Log.i("UploadServer", "Saved: ${targetFile.absolutePath} (session: $sessionId, count: ${imagePaths.size})")
-
-            // ------- REPORT PROGRESS TO UI -------
-            UploadProgressBus.uploadProgress.postValue(Pair(sessionId, imagePaths.size))
-            // --------------------------------------
-
-            // Clean up old sessions
-            cleanupOldSessions(now)
-
-            // Only insert session ONCE
-            if (imagePaths.size == imagesPerSession && !sessionInserted.contains(sessionId)) {
-                createAndInsertSession(sessionId, imagePaths.toList())
-                sessionInserted.add(sessionId)
-                sessionUploads.remove(sessionId)
-                sessionTimestamps.remove(sessionId)
-            }
-
-            newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, "File saved: ${targetFile.name}")
-        } catch (e: Exception) {
-            Log.e("UploadServer", "Upload error: ${e.message}", e)
-            newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "Error: ${e.message}")
+        return if (isZip) {
+            handlePmfiZip(sessionId, safeName, File(tmpPath), sectionParam)  // <-- pass it
+        } else {
+            handlePng(sessionId, safeName, File(tmpPath), isPmfi)
         }
     }
 
-    private fun extractFilename(contentDisposition: String): String? {
-        val parts = contentDisposition.split(";")
-        for (part in parts) {
-            val trimmed = part.trim()
-            if (trimmed.startsWith("filename=")) {
-                return trimmed.substringAfter("filename=").trim('"')
-            }
-        }
-        return null
+    // ------------------------------------------------------------------------
+    // PMFI ZIP handler (explicit section finalisation)
+    // ------------------------------------------------------------------------
+    private fun handlePmfiZip(sessionId: String, zipFilename: String, tmpFile: File,sectionParam: String?): Response {
+        // Prefer explicit section query (server sends &section=NAME)
+        val base = zipFilename.removeSuffix(".zip")
+        val inferred = base.substringAfter("${sessionId}_", missingDelimiterValue = base)
+        val section = (sectionParam ?: inferred).ifBlank { "section" }  // <-- use param
+        val sectionKey = "${sessionId}_$section"
+
+        val sectionDir = File(sessionsRoot, sectionKey).apply { mkdirs() }
+        val savedZip = File(sectionDir, zipFilename)
+        try { tmpFile.copyTo(savedZip, overwrite = true) } finally { tmpFile.delete() }
+
+        val extracted = unzipPngs(savedZip, sectionDir)
+        UploadProgressBus.uploadProgress.postValue(sectionKey to extracted.size)
+        Log.i(TAG, "PMFI ZIP saved $zipFilename -> ${extracted.size} frames (section=$section)")
+
+        insertSessionAsync(
+            sessionId = sectionKey,
+            imagePaths = extracted,
+            type = "PMFI",
+            label = section
+        )
+
+
+        finalisedKeys.add(sectionKey)
+        cleanupStaleSessions()
+        return ok("ZIP saved: $zipFilename (${extracted.size} frames)")
     }
 
-    // Remove old session batches after timeout to avoid memory leaks and confusion
-    private fun cleanupOldSessions(now: Long) {
-        val iterator = sessionTimestamps.iterator()
-        while (iterator.hasNext()) {
-            val (id, timestamp) = iterator.next()
-            if (now - timestamp > sessionTimeoutMillis) {
-                Log.i("UploadServer", "Session $id timed out and is being cleared.")
-                sessionUploads.remove(id)
-                iterator.remove()
-                sessionInserted.remove(id)
-            }
-        }
-    }
 
-    private fun createAndInsertSession(sessionId: String, imagePaths: List<String>) {
-        val timestamp = SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.getDefault()).format(Date())
+    // ------------------------------------------------------------------------
+    // PNG handler (AMSI or PMFI stream)
+    // ------------------------------------------------------------------------
+    private fun handlePng(sessionId: String, filename: String, tmpFile: File, isPmfi: Boolean): Response {
+        val sessionDir = File(sessionsRoot, sessionId).apply { mkdirs() }
+        val target = File(sessionDir, filename)
 
-        val fusedLocationClient = LocationServices.getFusedLocationProviderClient(context)
         try {
-            fusedLocationClient.lastLocation.addOnSuccessListener { location ->
-                val locationStr = if (location != null) {
-                    // Use Geocoder to reverse geocode coordinates into a place string
-                    var placeString: String? = null
-                    try {
-                        val geocoder = Geocoder(context, Locale.getDefault())
-                        val addresses = geocoder.getFromLocation(location.latitude, location.longitude, 1)
-                        if (!addresses.isNullOrEmpty()) {
-                            val address = addresses[0]
-                            val city = address.locality ?: ""
-                            val area = address.subAdminArea ?: ""
-                            val country = address.countryName ?: ""
-                            placeString = listOf(city, area, country)
-                                .filter { it.isNotBlank() }
-                                .joinToString(", ")
-                        }
-                    } catch (e: Exception) {
-                        Log.w("UploadServer", "Geocoder failed: ${e.message}")
-                    }
-                    placeString ?: "${location.latitude},${location.longitude}"
-                } else {
-                    "Unknown"
-                }
-                saveSessionToDb(timestamp, locationStr, imagePaths, sessionId)
-            }.addOnFailureListener {
-                saveSessionToDb(timestamp, "Unknown", imagePaths, sessionId)
-            }
+            tmpFile.copyTo(target, overwrite = true)
+        } finally {
+            tmpFile.delete()
+        }
 
-            // Fallback in case location doesn't return (after 2 seconds, insert anyway)
-            GlobalScope.launch {
-                delay(2000)
-                if (!sessionInserted.contains(sessionId)) {
-                    saveSessionToDb(timestamp, "Unknown", imagePaths, sessionId)
-                    sessionInserted.add(sessionId)
-                }
+        // Share one tracker, but AMSI is the only mode that auto-finalises here
+        val list = amsiUploads.getOrPut(sessionId) { synchronizedList(mutableListOf()) }
+        list.add(target.absolutePath)
+
+        UploadProgressBus.uploadProgress.postValue(sessionId to list.size)
+        Log.i(TAG, "PNG saved: $filename (session=$sessionId, count=${list.size}, pmfi=$isPmfi)")
+
+        cleanupStaleSessions()
+
+        if (!isPmfi) {
+            // ---- AMSI: finalise exactly at 16, once ----
+            if (list.size == imagesPerAmsi && finalisedKeys.add(sessionId)) {
+                insertSessionAsync(sessionId = sessionId, imagePaths = list.toList())
+                amsiUploads.remove(sessionId)
+                lastSeenAt.remove(sessionId)
             }
-        } catch (e: Exception) {
-            saveSessionToDb(timestamp, "Unknown", imagePaths, sessionId)
+        } else {
+            // ---- PMFI PNG stream (accepted + progress only) ----
+            // Intentionally do not finalise automatically to avoid repeated DB churn.
+            // If you want to finalise on timeout or min-count, you can add logic here later.
+        }
+
+        return ok("File saved: $filename")
+    }
+
+    // ------------------------------------------------------------------------
+    // Utilities
+    // ------------------------------------------------------------------------
+    private fun extractFilename(contentDisposition: String?): String? {
+        if (contentDisposition.isNullOrBlank()) return null
+        // e.g. Content-Disposition: form-data; name="file"; filename="image_00.png"
+        return contentDisposition.split(";")
+            .map { it.trim() }
+            .firstOrNull { it.startsWith("filename=", ignoreCase = true) }
+            ?.substringAfter("=", "")
+            ?.trim('"')
+    }
+
+    private fun unzipPngs(zipFile: File, destDir: File): List<String> {
+        val out = mutableListOf<String>()
+        ZipFile(zipFile).use { zf ->
+            val entries = zf.entries()
+            while (entries.hasMoreElements()) {
+                val e = entries.nextElement()
+                if (e.isDirectory) continue
+                val name = File(e.name).name
+                if (!name.lowercase(Locale.ROOT).endsWith(".png")) continue
+                val target = File(destDir, name)
+                zf.getInputStream(e).use { input ->
+                    target.outputStream().use { output -> input.copyTo(output) }
+                }
+                out.add(target.absolutePath)
+            }
+        }
+        return out.sorted()
+    }
+
+    private fun cleanupStaleSessions() {
+        val now = System.currentTimeMillis()
+        val stale = mutableListOf<String>()
+        for ((id, ts) in lastSeenAt.entries) {
+            if (now - ts > sessionTimeoutMillis) stale.add(id)
+        }
+        stale.forEach { id ->
+            Log.i(TAG, "Session $id timed out; clearing trackers.")
+            amsiUploads.remove(id)
+            lastSeenAt.remove(id)
+            finalisedKeys.remove(id)
         }
     }
 
-    private fun saveSessionToDb(timestamp: String, locationStr: String, imagePaths: List<String>, sessionId: String) {
-        GlobalScope.launch {
+    // ------------------------------------------------------------------------
+    // DB insert (no schema changes required)
+    // ------------------------------------------------------------------------
+    private fun insertSessionAsync(sessionId: String, imagePaths: List<String>, type: String = "AMSI", label: String? = null) {
+        val timestamp = SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.getDefault()).format(Date())
+        val fused = LocationServices.getFusedLocationProviderClient(context)
+
+        // If we already inserted this session, bail early
+        if (!dbInserted.add(sessionId)) {
+            Log.i(TAG, "Session $sessionId already inserted; skipping duplicate.")
+            return
+        }
+
+        // Schedule a fallback insert in case fused-location never returns
+        val fallbackJob = scope.launch {
+            delay(2000)
+            // Only insert if nobody else has done it (dbInserted already reserved our spot)
+            Log.w(TAG, "Location timeout; inserting session $sessionId with Unknown location.")
+            saveSessionToDb(timestamp, "Unknown", imagePaths, type, label)
+
+        }
+
+        try {
+            fused.lastLocation
+                .addOnSuccessListener { loc ->
+                    // If we reached here, cancel the fallback and insert with best location
+                    fallbackJob.cancel()
+
+                    val locationStr = loc?.let {
+                        var place: String? = null
+                        try {
+                            val geocoder = Geocoder(context, Locale.getDefault())
+                            val list = geocoder.getFromLocation(it.latitude, it.longitude, 1)
+                            if (!list.isNullOrEmpty()) {
+                                val a = list[0]
+                                val city = a.locality ?: ""
+                                val area = a.subAdminArea ?: ""
+                                val country = a.countryName ?: ""
+                                place = listOf(city, area, country)
+                                    .filter { s -> s.isNotBlank() }
+                                    .joinToString(", ")
+                            }
+                        } catch (ge: Exception) {
+                            Log.w(TAG, "Geocoder failed: ${ge.message}")
+                        }
+                        place ?: "${it.latitude},${it.longitude}"
+                    } ?: "Unknown"
+
+                    saveSessionToDb(timestamp, locationStr, imagePaths, type, label)
+                }
+                .addOnFailureListener { err ->
+                    // Cancel fallback; we’ll insert Unknown now (single insert)
+                    fallbackJob.cancel()
+                    Log.w(TAG, "lastLocation failed: ${err.message}. Inserting Unknown for $sessionId")
+                    saveSessionToDb(timestamp, "Unknown", imagePaths, type, label)
+                }
+        } catch (e: Exception) {
+            // Cancel fallback; insert Unknown now (single insert)
+            fallbackJob.cancel()
+            Log.w(TAG, "Location flow threw: ${e.message}. Inserting Unknown for $sessionId")
+            saveSessionToDb(timestamp, "Unknown", imagePaths, type, label)
+        }
+    }
+
+
+    private fun saveSessionToDb(
+        timestamp: String,
+        locationStr: String,
+        imagePaths: List<String>,
+        type: String = "AMSI",
+        label: String? = null
+    ) {
+        scope.launch {
             try {
                 AppDatabase.getDatabase(context).sessionDao().insert(
                     Session(
                         timestamp = timestamp,
                         location = locationStr,
-                        imagePaths = imagePaths
+                        imagePaths = imagePaths,
+                        type = type,
+                        label = label
                     )
                 )
-                Log.i("UploadServer", "Inserted session $sessionId with location $locationStr and ${imagePaths.size} images")
+                Log.i(TAG, "Inserted $type session (${imagePaths.size} images) @ $locationStr label=$label")
             } catch (e: Exception) {
-                Log.e("UploadServer", "Error inserting session $sessionId: ${e.message}", e)
+                Log.e(TAG, "DB insert error: ${e.message}", e)
             }
         }
     }
+
+
+    // ------------------------------------------------------------------------
+    // Response helpers
+    // ------------------------------------------------------------------------
+    private fun ok(msg: String) =
+        newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, msg)
+
+    private fun badRequest(msg: String) =
+        newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, msg)
 }
