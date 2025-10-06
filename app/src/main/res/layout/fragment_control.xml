@@ -36,7 +36,9 @@
                     android:layout_height="wrap_content"
                     android:text="Shutdown" />
 
-                <Space android:layout_width="12dp" android:layout_height="1dp"/>
+                <Space
+                    android:layout_width="12dp"
+                    android:layout_height="1dp" />
 
                 <Button
                     android:id="@+id/buttonCalibrate"
@@ -64,7 +66,7 @@
                     android:imeOptions="actionDone"
                     android:inputType="numberDecimal|number"
                     android:digits="0123456789."
-                    android:contentDescription="IP address input"/>
+                    android:contentDescription="IP address input" />
             </com.google.android.material.textfield.TextInputLayout>
 
             <!-- Connect / Disconnect -->
@@ -82,7 +84,9 @@
                     android:layout_weight="1"
                     android:text="Connect" />
 
-                <Space android:layout_width="12dp" android:layout_height="1dp"/>
+                <Space
+                    android:layout_width="12dp"
+                    android:layout_height="1dp" />
 
                 <Button
                     android:id="@+id/buttonDisconnect"
@@ -183,17 +187,27 @@
                 android:textStyle="bold"
                 android:textSize="18sp"
                 android:layout_marginTop="16dp"
-                android:layout_marginBottom="6dp"/>
+                android:layout_marginBottom="6dp" />
 
-            <EditText
-                android:id="@+id/pmfiIniEdit"
+            <com.google.android.material.textfield.TextInputLayout
+                android:id="@+id/pmfiIniLayout"
+                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
                 android:layout_width="match_parent"
-                android:layout_height="140dp"
-                android:gravity="top|start"
-                android:hint="Paste your [pmfi] INI here"
-                android:inputType="textMultiLine"
-                android:overScrollMode="always"
-                android:scrollbars="vertical" />
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="12dp"
+                app:boxBackgroundMode="outline"
+                app:endIconMode="clear_text">
+
+                <com.google.android.material.textfield.TextInputEditText
+                    android:id="@+id/pmfiIniEdit"
+                    android:layout_width="match_parent"
+                    android:layout_height="140dp"
+                    android:gravity="top|start"
+                    android:hint="Paste your [pmfi] INI here"
+                    android:inputType="textMultiLine"
+                    android:overScrollMode="always"
+                    android:scrollbars="vertical" />
+            </com.google.android.material.textfield.TextInputLayout>
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -208,7 +222,9 @@
                     android:layout_weight="1"
                     android:text="Upload INI" />
 
-                <Space android:layout_width="8dp" android:layout_height="1dp"/>
+                <Space
+                    android:layout_width="8dp"
+                    android:layout_height="1dp" />
 
                 <Button
                     android:id="@+id/pmfiStartBtn"
@@ -219,19 +235,125 @@
                     android:enabled="false" />
             </LinearLayout>
 
+            <!-- PMFI status strip (GLOBAL progress) -->
+            <LinearLayout
+                android:id="@+id/pmfi_status_row"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp">
+
+                <TextView
+                    android:id="@+id/pmfiSectionLabel"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="PMFI idle"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/pmfiStageLabel"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="" />
+
+                <ProgressBar
+                    android:id="@+id/pmfiProgressBar"
+                    style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="match_parent"
+                    android:layout_height="6dp"
+                    android:max="100"
+                    android:progress="0"
+                    android:indeterminate="false" />
+
+                <!-- SINGLE total line with percentage -->
+                <TextView
+                    android:id="@+id/pmfiCounter"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="0 / 0 (0%)"
+                    android:gravity="end"
+                    android:layout_marginTop="2dp" />
+            </LinearLayout>
+
+            <!-- PMFI Section Card (PER-SECTION progress) -->
+            <LinearLayout
+                android:id="@+id/pmfi_section_card"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:paddingTop="8dp"
+                android:paddingBottom="8dp">
+
+                <!-- Only the sections count (removed 'Section: –') -->
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <TextView
+                        android:id="@+id/tvSectionsCount"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:gravity="end"
+                        android:text="Sections: 0/0" />
+                </LinearLayout>
+
+                <!-- Human-readable meaning -->
+                <TextView
+                    android:id="@+id/tvSectionInfo"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="—"
+                    android:textSize="12sp"
+                    android:alpha="0.8"
+                    android:layout_marginTop="2dp" />
+
+                <!-- Per-section progress -->
+                <ProgressBar
+                    android:id="@+id/pbSection"
+                    style="?android:attr/progressBarStyleHorizontal"
+                    android:layout_width="match_parent"
+                    android:layout_height="8dp"
+                    android:max="100"
+                    android:layout_marginTop="8dp" />
+
+                <TextView
+                    android:id="@+id/tvSectionFrames"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="0/0 (0%) in this section"
+                    android:layout_marginTop="4dp" />
+            </LinearLayout>
+
+            <!-- Optional: mini console for pmfi.log -->
+            <ScrollView
+                android:id="@+id/pmfiLogContainer"
+                android:layout_width="match_parent"
+                android:layout_height="100dp"
+                android:fillViewport="true"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/pmfiLog"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:textIsSelectable="true"
+                    android:textSize="12sp"
+                    android:typeface="monospace"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp" />
+            </ScrollView>
+
+            <!-- Legacy status text (hidden) -->
             <TextView
                 android:id="@+id/pmfiStatusText"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text=""
                 android:paddingTop="6dp"
-                android:textIsSelectable="true"/>
-            <ProgressBar
-                android:id="@+id/pmfiProgressBar"
-                style="?android:attr/progressBarStyleHorizontal"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:visibility="gone"/>
+                android:textIsSelectable="true"
+                android:visibility="gone" />
 
         </LinearLayout>
     </ScrollView>
@@ -253,4 +375,5 @@
             android:layout_height="wrap_content"
             android:background="@android:color/black" />
     </ScrollView>
+
 </LinearLayout>

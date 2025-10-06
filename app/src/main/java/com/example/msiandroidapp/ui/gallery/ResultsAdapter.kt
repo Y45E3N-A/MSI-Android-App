@@ -199,7 +199,6 @@ class ResultsAdapter(
             }
         }
     }
-
     inner class SessionVH(view: View) : RecyclerView.ViewHolder(view) {
         private val title: TextView = view.findViewById(R.id.completed_title)
         private val subtitle: TextView = view.findViewById(R.id.completed_subtitle)
@@ -213,15 +212,32 @@ class ResultsAdapter(
             selected: Boolean,
             inSelection: Boolean
         ) {
-            title.text = displayNameProvider.titleFor(item.session)
-            subtitle.text = displayNameProvider.subtitleFor(item.session)
-            badge.text = "SESSION"
+            val session = item.session
+            title.text = displayNameProvider.titleFor(session)
+            subtitle.text = displayNameProvider.subtitleFor(session)
 
-            itemView.setOnClickListener { onClick(item.session) }
-            itemView.setOnLongClickListener { onLong(item.session); true }
+            // --- New: badge style + color based on type ---
+            val type = session.type.uppercase()
+            when (type) {
+                "PMFI" -> {
+                    badge.text = "PMFI"
+                    badge.setBackgroundResource(R.drawable.bg_badge_pmfi)
+                }
+                "AMSI" -> {
+                    badge.text = "AMSI"
+                    badge.setBackgroundResource(R.drawable.bg_badge_amsi)
+                }
+                else -> {
+                    badge.text = type
+                    badge.setBackgroundResource(R.drawable.bg_badge_default)
+                }
+            }
+
+            itemView.setOnClickListener { onClick(session) }
+            itemView.setOnLongClickListener { onLong(session); true }
 
             applySelectionVisuals(selected, inSelection)
-            selectionIcon?.setOnClickListener { if (inSelection) onClick(item.session) }
+            selectionIcon?.setOnClickListener { if (inSelection) onClick(session) }
         }
 
         fun bindTitleOnly(item: ResultListItem.SessionItem) {
@@ -256,15 +272,19 @@ class ResultsAdapter(
             selected: Boolean,
             inSelection: Boolean
         ) {
-            title.text = displayNameProvider.titleFor(item.profile)
-            subtitle.text = item.profile.summary ?: "Calibration saved"
-            badge.text = "CALIBRATION"
+            val cal = item.profile
+            title.text = displayNameProvider.titleFor(cal)
+            subtitle.text = cal.summary ?: "Calibration saved"
 
-            itemView.setOnClickListener { onClick(item.profile) }
-            itemView.setOnLongClickListener { onLong(item.profile); true }
+            // --- New: consistent orange calibration badge ---
+            badge.text = "CALIBRATION"
+            badge.setBackgroundResource(R.drawable.bg_badge_calib)
+
+            itemView.setOnClickListener { onClick(cal) }
+            itemView.setOnLongClickListener { onLong(cal); true }
 
             applySelectionVisuals(selected, inSelection)
-            selectionIcon?.setOnClickListener { if (inSelection) onClick(item.profile) }
+            selectionIcon?.setOnClickListener { if (inSelection) onClick(cal) }
         }
 
         fun bindTitleOnly(item: ResultListItem.CalibrationItem) {
@@ -285,4 +305,8 @@ class ResultsAdapter(
             )
         }
     }
+
+
+
+
 }

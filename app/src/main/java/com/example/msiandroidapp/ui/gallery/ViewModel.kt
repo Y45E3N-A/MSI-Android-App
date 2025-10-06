@@ -12,24 +12,19 @@ class GalleryViewModel(application: Application) : AndroidViewModel(application)
     val calibrations: LiveData<List<CalibrationProfile>> = db.calibrationDao().getAll()
 
     // Merge into a single Results feed, newest first
+    // AFTER (no pre-sorting — Fragment handles "newest first")
     val results: LiveData<List<ResultListItem>> = MediatorLiveData<List<ResultListItem>>().apply {
         var s: List<Session> = emptyList()
         var c: List<CalibrationProfile> = emptyList()
         fun publish() {
-            val items = buildList {
+            value = buildList {
                 addAll(s.map { ResultListItem.SessionItem(it) })
                 addAll(c.map { ResultListItem.CalibrationItem(it) })
-            }.sortedByDescending {
-                when (it) {
-                    is ResultListItem.SessionItem -> it.session.id
-                    is ResultListItem.CalibrationItem -> it.profile.id
-                    else -> Long.MIN_VALUE
-                }
             }
-            value = items
         }
         addSource(db.sessionDao().getAllSessions()) { s = it; publish() }
         addSource(db.calibrationDao().getAll()) { c = it; publish() }
     }
+
 
 }

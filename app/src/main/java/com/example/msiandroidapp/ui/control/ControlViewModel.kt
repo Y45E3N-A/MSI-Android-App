@@ -16,7 +16,17 @@ class ControlViewModel : ViewModel() {
     val pmfiCurrentSection = MutableLiveData<String?>(null)
     val pmfiFps = MutableLiveData<Double?>(null)
     val pmfiEta = MutableLiveData<Int?>(null)
-
+    val pmfiPercent = MutableLiveData(0)                // 0..100
+    val pmfiSectionFrames = MutableLiveData(0)          // frames in current section
+    val pmfiSectionState = MutableLiveData<String?>()   // "capturing" | "packing" | "uploaded ..." | etc.
+    val pmfiComplete = MutableLiveData(false)
+    val pmfiLogLine = MutableLiveData<String?>()
+    val pmfiSectionIndex   = MutableLiveData(0)       // 0-based, for UI show +1
+    val pmfiSectionCount   = MutableLiveData(0)       // total sections in plan
+    val pmfiSectionDone    = MutableLiveData(0)       // frames done in THIS section
+    val pmfiSectionTotal   = MutableLiveData(0)       // frames in THIS section
+    val pmfiSectionPercent = MutableLiveData(0)       // 0..100 for THIS section
+    val pmfiSectionInfo    = MutableLiveData<String?>() // human-readable “meaning” line
     fun addBitmap(idx: Int, bitmap: Bitmap) {
         val current = (capturedBitmaps.value ?: MutableList<Bitmap?>(16) { null }).toMutableList()
         if (idx in 0..15) current[idx] = bitmap

@@ -20,6 +20,7 @@ import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.example.msiandroidapp.R
+import com.example.msiandroidapp.data.AppDatabase
 import com.example.msiandroidapp.data.CalibrationProfile
 import com.example.msiandroidapp.data.Session
 import com.example.msiandroidapp.ui.control.ControlViewModel
@@ -38,7 +39,7 @@ import java.util.zip.ZipOutputStream
 
 class GalleryFragment : Fragment() {
 
-    // ---- NEW: filter model ----
+    // ---- filter model ----
     private enum class ResultsFilter { ALL, SESSIONS, CALIBRATIONS }
     private var currentFilter: ResultsFilter = ResultsFilter.ALL
     private val STATE_FILTER_KEY = "results_filter"
@@ -51,11 +52,11 @@ class GalleryFragment : Fragment() {
 
     private val handler = Handler(Looper.getMainLooper())
 
-    // Selection state (owned by Fragment)
+    // Selection state
     private val selectedIds = linkedSetOf<Long>()
     private var inSelectionMode = false
 
-    // Back press callback (enabled only when there’s a selection)
+    // Back press callback
     private lateinit var backCallback: OnBackPressedCallback
 
     // Cached toolbar items
@@ -79,7 +80,6 @@ class GalleryFragment : Fragment() {
         super.onCreate(savedInstanceState)
         setHasOptionsMenu(true)
 
-        // restore filter
         currentFilter = savedInstanceState?.getString(STATE_FILTER_KEY)?.let {
             runCatching { ResultsFilter.valueOf(it) }.getOrNull()
         } ?: ResultsFilter.ALL
@@ -143,7 +143,6 @@ class GalleryFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         galleryViewModel.results.observe(viewLifecycleOwner) { list ->
-            // Apply filter + newest-first sort before showing
             val filteredSorted = applyFilterAndSort(list)
             submitMerged(filteredSorted)
             reconcileSelectionWith(adapter.currentList)
@@ -165,15 +164,10 @@ class GalleryFragment : Fragment() {
     // ---------- Toolbar ----------
     override fun onCreateOptionsMenu(menu: Menu, inflater: MenuInflater) {
         inflater.inflate(R.menu.menu_gallery_selection, menu)
-
-        // selection actions
         menuItemRenameInline = menu.findItem(R.id.action_rename_inline)
-
-        // filter submenu items (added to the same menu XML below)
         filterAllItem = menu.findItem(R.id.filter_all)
         filterSessionsItem = menu.findItem(R.id.filter_sessions)
         filterCalibsItem = menu.findItem(R.id.filter_calibrations)
-
         super.onCreateOptionsMenu(menu, inflater)
     }
 
@@ -182,15 +176,12 @@ class GalleryFragment : Fragment() {
         val delete = menu.findItem(R.id.action_delete_selected)
         val cancel = menu.findItem(R.id.action_cancel_selection)
 
-        // Show selection actions only when in selection mode
         share?.isVisible  = inSelectionMode
         delete?.isVisible = inSelectionMode
         cancel?.isVisible = inSelectionMode
 
-        // Show inline Rename ONLY when exactly one item is selected
         menuItemRenameInline?.isVisible = inSelectionMode && selectedIds.size == 1
 
-        // Update checkmarks on filter menu
         filterAllItem?.isChecked = currentFilter == ResultsFilter.ALL
         filterSessionsItem?.isChecked = currentFilter == ResultsFilter.SESSIONS
         filterCalibsItem?.isChecked = currentFilter == ResultsFilter.CALIBRATIONS
@@ -229,10 +220,8 @@ class GalleryFragment : Fragment() {
     private fun setFilter(f: ResultsFilter) {
         if (currentFilter == f) return
         currentFilter = f
-        // Re-apply to current data
         val base = galleryViewModel.results.value ?: emptyList()
         submitMerged(applyFilterAndSort(base), forceHideInProgress = true)
-        // Exit selection mode because visible set changed
         clearSelectionAndExitMode()
     }
 
@@ -242,29 +231,24 @@ class GalleryFragment : Fragment() {
 
     // ---------- Filtering + newest-first sorting ----------
     private fun applyFilterAndSort(list: List<ResultListItem>): List<ResultListItem> {
-        // Drop InProgress here; that row is handled separately by submitMerged()
         val filtered = when (currentFilter) {
             ResultsFilter.ALL -> list.filter { it !is ResultListItem.InProgress }
             ResultsFilter.SESSIONS -> list.filter { it is ResultListItem.SessionItem }
             ResultsFilter.CALIBRATIONS -> list.filter { it is ResultListItem.CalibrationItem }
         }
 
-        // Sort newest-first using best available timestamp
         return filtered.sortedByDescending { item ->
             when (item) {
-                is ResultListItem.SessionItem -> sortTimestampForSession(item.session)
+                is ResultListItem.SessionItem     -> sortTimestampForSession(item.session)
                 is ResultListItem.CalibrationItem -> item.profile.createdAt
-                is ResultListItem.InProgress -> Long.MIN_VALUE // not used; filtered out
+                is ResultListItem.InProgress      -> Long.MIN_VALUE // not present due to filter
             }
         }
     }
 
     private fun sortTimestampForSession(session: Session): Long {
-        // Prefer a parsed timestamp if available; else fall back to file lastModified
         val parsed = runCatching { parseSessionDate(session.timestamp).time }.getOrNull()
         if (parsed != null) return parsed
-
-        // If you have imagePaths, use the newest image's lastModified as a fallback
         val newest = session.imagePaths.maxOfOrNull { path -> File(path).lastModified() }
         return newest ?: 0L
     }
@@ -300,11 +284,11 @@ class GalleryFragment : Fragment() {
     private fun selectAllVisible() {
         val all = adapter.currentList
             .filter { it !is ResultListItem.InProgress }
-            .map {
-                when (it) {
-                    is ResultListItem.SessionItem     -> idForSession(it.session)
-                    is ResultListItem.CalibrationItem -> idForCalibration(it.profile)
-                    else -> error("unreachable")
+            .map { item ->
+                when (item) {
+                    is ResultListItem.SessionItem     -> idForSession(item.session)
+                    is ResultListItem.CalibrationItem -> idForCalibration(item.profile)
+                    is ResultListItem.InProgress      -> error("Filtered above")
                 }
             }
             .toSet()
@@ -318,13 +302,16 @@ class GalleryFragment : Fragment() {
 
     private fun reconcileSelectionWith(list: List<ResultListItem>) {
         if (selectedIds.isEmpty()) return
-        val valid = list.filter { it !is ResultListItem.InProgress }.map {
-            when (it) {
-                is ResultListItem.SessionItem     -> idForSession(it.session)
-                is ResultListItem.CalibrationItem -> idForCalibration(it.profile)
-                else -> error("unreachable")
+        val valid = list
+            .filter { it !is ResultListItem.InProgress }
+            .map { item ->
+                when (item) {
+                    is ResultListItem.SessionItem     -> idForSession(item.session)
+                    is ResultListItem.CalibrationItem -> idForCalibration(item.profile)
+                    is ResultListItem.InProgress      -> error("Filtered above")
+                }
             }
-        }.toSet()
+            .toSet()
         val changed = selectedIds.removeAll { it !in valid }
         if (changed) adapter.updateSelection(selectedIds)
         if (selectedIds.isEmpty()) clearSelectionAndExitMode()
@@ -454,12 +441,10 @@ class GalleryFragment : Fragment() {
             dlg.getButton(androidx.appcompat.app.AlertDialog.BUTTON_POSITIVE).setOnClickListener {
                 val name = input.text?.toString()?.trim().orEmpty()
                 if (name.isBlank()) {
-                    input.error = "Name cannot be empty"
-                    return@setOnClickListener
+                    input.error = "Name cannot be empty"; return@setOnClickListener
                 }
                 if (name.length > 64) {
-                    input.error = "Keep it under 64 characters"
-                    return@setOnClickListener
+                    input.error = "Keep it under 64 characters"; return@setOnClickListener
                 }
                 setter(name)
                 dlg.dismiss()
@@ -467,7 +452,13 @@ class GalleryFragment : Fragment() {
         }
         dlg.show()
     }
+    private fun kindPrefixFor(session: Session) = when (session.type.uppercase(Locale.ROOT)) {
+        "PMFI" -> "[PMFI]"
+        "AMSI" -> "[AMSI]"
+        else   -> "[${session.type.uppercase(Locale.ROOT)}]"
+    }
 
+    private fun kindPrefixFor(cal: CalibrationProfile) = "[CALIBRATION]"
     private fun renameSession(sessionId: Long, newName: String) {
         prefs.edit().putString(spKeySession(sessionId), newName).apply()
         refreshDisplayNameForId(sessionId)
@@ -488,22 +479,22 @@ class GalleryFragment : Fragment() {
         val sessions = mutableListOf<Session>()
         val calibs   = mutableListOf<CalibrationProfile>()
 
-        current.forEach {
-            when (it) {
+        current.forEach { item ->
+            when (item) {
                 is ResultListItem.SessionItem ->
-                    if (chosen.contains(idForSession(it.session)) && it.session.imagePaths.size >= 16)
-                        sessions.add(it.session)
+                    if (chosen.contains(item.session.id))
+                        sessions.add(item.session)
                 is ResultListItem.CalibrationItem ->
-                    if (chosen.contains(idForCalibration(it.profile)))
-                        calibs.add(it.profile)
-                else -> Unit
+                    if (chosen.contains(1_000_000_000_000L + item.profile.id))
+                        calibs.add(item.profile)
+                is ResultListItem.InProgress -> Unit
             }
         }
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val uris = arrayListOf<Uri>()
-                if (sessions.isNotEmpty()) buildSessionsZip(sessions)?.let { uris.add(fileUri(it)) }
+                buildSessionsZip(sessions)?.let { uris.add(fileUri(it)) }
                 calibs.forEach { makeCalibrationJsonFile(it)?.let { f -> uris.add(fileUri(f)) } }
 
                 withContext(Dispatchers.Main) {
@@ -511,12 +502,23 @@ class GalleryFragment : Fragment() {
                         msg("Nothing to share. Select at least one complete session or calibration.")
                         return@withContext
                     }
-                    val intent = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                        type = "application/octet-stream"
+
+                    val share = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
+                        type = "*/*" // ZIP + JSON
                         putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
-                    startActivity(Intent.createChooser(intent, "Share results"))
+
+                    // Grant URI permission to all potential targets
+                    val targets = requireContext().packageManager.queryIntentActivities(share, 0)
+                    targets.forEach { ri ->
+                        val pkg = ri.activityInfo.packageName
+                        uris.forEach { uri ->
+                            requireContext().grantUriPermission(pkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                    }
+
+                    startActivity(Intent.createChooser(share, "Share results"))
                     clearSelectionAndExitMode()
                 }
             } catch (e: Exception) {
@@ -532,20 +534,17 @@ class GalleryFragment : Fragment() {
         val sessions = mutableListOf<Session>()
         val calibs   = mutableListOf<CalibrationProfile>()
 
-        current.forEach {
-            when (it) {
+        current.forEach { item ->
+            when (item) {
                 is ResultListItem.SessionItem ->
-                    if (chosen.contains(idForSession(it.session))) sessions.add(it.session)
+                    if (chosen.contains(item.session.id)) sessions.add(item.session)
                 is ResultListItem.CalibrationItem ->
-                    if (chosen.contains(idForCalibration(it.profile))) calibs.add(it.profile)
-                else -> Unit
+                    if (chosen.contains(1_000_000_000_000L + item.profile.id)) calibs.add(item.profile)
+                is ResultListItem.InProgress -> Unit
             }
         }
 
-        if (sessions.isEmpty() && calibs.isEmpty()) {
-            msg("No items selected.")
-            return
-        }
+        if (sessions.isEmpty() && calibs.isEmpty()) { msg("No items selected."); return }
 
         val title = buildString {
             append("Delete ")
@@ -560,14 +559,28 @@ class GalleryFragment : Fragment() {
             .setMessage("This permanently removes the selected records (and session images).")
             .setPositiveButton("Delete") { _, _ ->
                 lifecycleScope.launch(Dispatchers.IO) {
-                    for (s in sessions) {
+                    val db = AppDatabase.getDatabase(requireContext())
+                    val sessionDao = db.sessionDao()
+                    val calibDao   = db.calibrationDao()
+
+                    // Sessions: delete files + DB
+                    sessions.forEach { s ->
                         s.imagePaths.forEach { path -> runCatching { File(path).delete() } }
+                        runCatching { s.imagePaths.firstOrNull()?.let { File(it).parentFile?.deleteRecursively() } }
                         prefs.edit().remove(spKeySession(s.id)).apply()
+                        runCatching { sessionDao.delete(s) }
                     }
-                    for (c in calibs) {
+
+                    // Calibrations: DB + prefs
+                    calibs.forEach { c ->
                         prefs.edit().remove(spKeyCalib(c.id)).apply()
+                        runCatching { calibDao.delete(c) }
                     }
-                    withContext(Dispatchers.Main) { clearSelectionAndExitMode() }
+
+                    withContext(Dispatchers.Main) {
+                        clearSelectionAndExitMode()
+                        // Room LiveData will refresh automatically
+                    }
                 }
             }
             .setNegativeButton("Cancel", null)
@@ -575,36 +588,9 @@ class GalleryFragment : Fragment() {
     }
 
     // ---------- ZIP / EXIF ----------
-    private fun buildSessionsZip(sessions: List<Session>): File? = runCatching {
-        val cacheDir = File(requireContext().cacheDir, "shares").apply { mkdirs() }
-        val zipFile = File(cacheDir, "sessions_${System.currentTimeMillis()}.zip")
 
-        ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
-            sessions.forEach { s ->
-                val folder = buildFolderName(s)
-                s.imagePaths.take(16).forEachIndexed { idx, path ->
-                    val src = File(path)
-                    if (!src.exists()) return@forEachIndexed
 
-                    val tempCopy = File(cacheDir, buildImageFileNameForShare(idx))
-                    stampExifToCopy(src, tempCopy, s, idx)
 
-                    FileInputStream(tempCopy).use { fis ->
-                        zos.putNextEntry(ZipEntry("$folder/${tempCopy.name}"))
-                        fis.copyTo(zos)
-                        zos.closeEntry()
-                    }
-                    tempCopy.delete()
-                }
-            }
-        }
-        zipFile
-    }.getOrNull()
-
-    private fun buildImageFileNameForShare(index: Int): String {
-        val wl = wavelengthForIndex(index)
-        return if (wl != null) "Wavelength_${wl}nm.png" else "Wavelength_unknown.png"
-    }
 
     private fun makeCalibrationJsonFile(profile: CalibrationProfile): File? = runCatching {
         val dir = File(requireContext().cacheDir, "exports").apply { mkdirs() }
@@ -620,7 +606,7 @@ class GalleryFragment : Fragment() {
             wlToNorm.toSortedMap().forEach { (wl, v) -> normsObj.put(wl.toString(), v) }
             put("norms", normsObj)
             val arr = JSONArray()
-            (profile.ledNorms ?: emptyList()).forEach { arr.put(it) }
+            (profile.ledNorms).forEach { arr.put(it) }
             put("led_norms", arr)
         }
 
@@ -632,39 +618,138 @@ class GalleryFragment : Fragment() {
         AMSI_WAVELENGTHS.getOrNull(indexInSession)
 
     private fun parseSessionDate(sessionTimestamp: String): java.util.Date {
-        val fmts = listOf(
+        // 1) Try ISO-8601 first (safest if you ever switch to it)
+        runCatching {
+            val instant = java.time.Instant.parse(sessionTimestamp.trim())
+            return java.util.Date.from(instant)
+        }
+
+        // 2) Try known legacy patterns
+        val patterns = listOf(
             "yyyy-MM-dd HH:mm:ss",
             "yyyy-MM-dd'T'HH:mm:ss'Z'",
             "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'",
             "dd/MM/yyyy HH:mm:ss",
             "EEE MMM dd HH:mm:ss zzz yyyy"
         )
-        return fmts.firstNotNullOfOrNull { fmt ->
-            runCatching { SimpleDateFormat(fmt, Locale.US).parse(sessionTimestamp) }.getOrNull()
-        } ?: java.util.Date()
+
+        for (p in patterns) {
+            val fmt = java.text.SimpleDateFormat(p, java.util.Locale.US).apply {
+                timeZone = java.util.TimeZone.getTimeZone("Europe/London")
+            }
+            val d = runCatching { fmt.parse(sessionTimestamp) }.getOrNull()
+            if (d != null) {
+                // sanity check year
+                val cal = java.util.Calendar.getInstance().apply { time = d }
+                val y = cal.get(java.util.Calendar.YEAR)
+                if (y in 2000..2100) return d
+            }
+        }
+
+        // 3) As a last resort, now()
+        return java.util.Date()
     }
 
+
     private fun datePartsForName(session: Session): Pair<String, String> {
-        val dt = parseSessionDate(session.timestamp)
-        val d = SimpleDateFormat("dd_MM_yyyy", Locale.US).format(dt)
-        val t = SimpleDateFormat("HH_mm_ss", Locale.US).format(dt)
-        return d to t
+        fun fromDate(ms: Long): Pair<String, String> {
+            val z = java.util.TimeZone.getTimeZone("Europe/London")
+            val dFmt = java.text.SimpleDateFormat("dd_MM_yyyy", java.util.Locale.US).apply { timeZone = z }
+            val tFmt = java.text.SimpleDateFormat("HH_mm_ss", java.util.Locale.US).apply { timeZone = z }
+            val dt = java.util.Date(ms)
+            return dFmt.format(dt) to tFmt.format(dt)
+        }
+
+        // Try parse
+        val parsed = runCatching { parseSessionDate(session.timestamp) }.getOrNull()
+        if (parsed != null) {
+            val cal = java.util.Calendar.getInstance().apply { time = parsed }
+            val y = cal.get(java.util.Calendar.YEAR)
+            if (y in 2000..2100) return fromDate(parsed.time)
+        }
+
+        // Fallback: newest file in the session
+        val newestMs = session.imagePaths
+            .mapNotNull { runCatching { java.io.File(it).lastModified() }.getOrNull() }
+            .filter { it > 0L }
+            .maxOrNull()
+
+        if (newestMs != null) return fromDate(newestMs)
+
+        // Last resort: current time
+        return fromDate(System.currentTimeMillis())
     }
+
 
     private fun buildFolderName(session: Session): String {
         val (d, t) = datePartsForName(session)
-        val loc = (session.location ?: "UnknownLoc").trim()
+        val loc = (session.location).trim().ifEmpty { "UnknownLoc" }
         val custom = prefs.getString(spKeySession(session.id), "")?.trim().orEmpty()
         val title = if (custom.isNotEmpty()) sanitizeName(custom) else sanitizeName(defaultSessionTitle(session))
         return "${title}___Date_${d}___Time_${t}___Location_${sanitizeName(loc)}"
     }
 
-    private fun stampExifToCopy(src: File, dst: File, session: Session, indexInSession: Int) {
-        // Copy original bytes to the .png-named temp file
-        FileInputStream(src).use { input -> FileOutputStream(dst).use { output -> input.copyTo(output) } }
+    private fun buildSessionsZip(sessions: List<Session>): File? = runCatching {
+        val cacheDir = File(requireContext().cacheDir, "shares").apply { mkdirs() }
+        val zipFile = File(cacheDir, "sessions_${System.currentTimeMillis()}.zip")
 
-        // Attach metadata (supported for PNG via XMP in ExifInterface)
-        try {
+        ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
+            sessions.forEach { s ->
+                val folder = buildFolderName(s)
+
+                // natural-ish ordering by filename so PMFI sequences are stable
+                val paths = s.imagePaths
+                    .map { File(it) }
+                    .filter { it.exists() }
+                    .sortedBy { it.name.lowercase(Locale.ROOT) }
+
+                val isStandardAmsi = s.type.equals("AMSI", true) && paths.size == 16
+
+                paths.forEachIndexed { idx, src ->
+                    val outName = if (isStandardAmsi) {
+                        // 16 fixed wavelengths
+                        buildAmsiImageNameForShare(idx)
+                    } else {
+                        // PMFI / arbitrary count
+                        "frame_${String.format(Locale.US, "%04d", idx + 1)}.png"
+                    }
+
+                    // copy + (light) EXIF tagging into a temp file
+                    val tempCopy = File(cacheDir, "tmp_${System.nanoTime()}_$outName")
+                    stampExifToCopy(src, tempCopy, s, idx, isStandardAmsi)
+
+                    FileInputStream(tempCopy).use { fis ->
+                        zos.putNextEntry(ZipEntry("$folder/$outName"))
+                        fis.copyTo(zos)
+                        zos.closeEntry()
+                    }
+                    tempCopy.delete()
+                }
+            }
+        }
+        zipFile
+    }.getOrNull()
+
+    private fun buildAmsiImageNameForShare(index: Int): String {
+        val wl = wavelengthForIndex(index)
+        return if (wl != null) "Wavelength_${wl}nm.png" else "Wavelength_unknown.png"
+    }
+
+    private fun stampExifToCopy(
+        src: File,
+        dst: File,
+        session: Session,
+        indexInSession: Int,
+        isStandardAmsi: Boolean
+    ) {
+        // just byte-copy first
+        FileInputStream(src).use { input ->
+            FileOutputStream(dst).use { output ->
+                input.copyTo(output)
+            }
+        }
+        // Try to enrich EXIF (PNG may have limited support; we best-effort)
+        runCatching {
             val exif = ExifInterface(dst.absolutePath)
             val dt = parseSessionDate(session.timestamp)
             val exifFormat = SimpleDateFormat("dd-MM-yyyy | HH:mm:ss", Locale.US)
@@ -673,42 +758,46 @@ class GalleryFragment : Fragment() {
             exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, dateStr)
             exif.setAttribute(ExifInterface.TAG_DATETIME, dateStr)
 
-            val wl = wavelengthForIndex(indexInSession)
-            val description = buildString {
+            val sb = StringBuilder().apply {
                 append("MSI capture; Session ${session.id}; ")
                 append("${session.timestamp}; ")
-                append("Location: ${session.location ?: "Unknown"}")
-                if (wl != null) append("; Wavelength: ${wl}nm")
+                append("Location: ${session.location.ifEmpty { "Unknown" }}")
+                if (isStandardAmsi) {
+                    wavelengthForIndex(indexInSession)?.let { wl ->
+                        append("; Wavelength: ${wl}nm")
+                    }
+                } else {
+                    append("; FrameIndex: ${indexInSession}")
+                }
+                append("; Type: ${session.type}")
             }
-            exif.setAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION, description)
-            exif.setAttribute(
-                ExifInterface.TAG_USER_COMMENT,
-                "Session=${session.id}; Time=${session.timestamp}; Location=${session.location ?: "Unknown"};" +
-                        (wl?.let { " Wavelength=${it}nm" } ?: "")
-            )
+
+            exif.setAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION, sb.toString())
+            exif.setAttribute(ExifInterface.TAG_USER_COMMENT, sb.toString())
             exif.saveAttributes()
-        } catch (_: Exception) { }
+        }
     }
 
 
     private fun displayNameFor(session: Session?): String {
         if (session == null) return "Session ${System.currentTimeMillis()}"
-        val overridden = prefs.getString(spKeySession(session.id), "")?.trim().orEmpty()
-        return if (overridden.isNotEmpty()) overridden else defaultSessionTitle(session)
+        val custom = prefs.getString(spKeySession(session.id), "")?.trim().orEmpty()
+        val base   = if (custom.isNotEmpty()) custom else "Session ${session.id}"
+        return "${kindPrefixFor(session)} $base"
     }
 
     private fun displayNameFor(profile: CalibrationProfile): String {
         val local = prefs.getString(spKeyCalib(profile.id), "")?.trim().orEmpty()
-        val dbName = (profile.name ?: "").trim()
-        return when {
+        val base  = when {
             local.isNotEmpty() -> local
-            dbName.isNotEmpty() -> dbName
+            profile.name.isNotBlank() -> profile.name
             else -> "Calibration ${profile.id}"
         }
+        return "${kindPrefixFor(profile)} $base"
     }
 
     private fun subtitleFor(session: Session): String {
-        val latLon = (session.location ?: "Unknown").trim()
+        val latLon = (session.location).trim().ifEmpty { "Unknown" }
         val dt = parseSessionDate(session.timestamp)
         val ts = SimpleDateFormat("| dd-MM-yyyy | HH:mm:ss", Locale.getDefault()).format(dt)
         return "$latLon — $ts"
@@ -721,7 +810,7 @@ class GalleryFragment : Fragment() {
 
     private fun extractCalibrationMap(profile: CalibrationProfile): Map<Int, Double> {
         val list = profile.ledNorms
-        return if (list != null && list.size == AMSI_WAVELENGTHS.size) {
+        return if (list.size == AMSI_WAVELENGTHS.size) {
             AMSI_WAVELENGTHS.indices.associate { i -> AMSI_WAVELENGTHS[i] to list[i] }
         } else emptyMap()
     }
@@ -731,7 +820,7 @@ class GalleryFragment : Fragment() {
             when (item) {
                 is ResultListItem.SessionItem     -> item.session.id == selId
                 is ResultListItem.CalibrationItem -> 1_000_000_000_000L + item.profile.id == selId
-                else -> false
+                is ResultListItem.InProgress      -> false
             }
         }
         if (index >= 0) {
