@@ -19,7 +19,7 @@ import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 
 /**
- * UploadServer (rewritten)
+ * UploadServer (rewritten, compile-clean)
  *
  * Endpoints:
  *   GET  /health                     -> "OK"
@@ -32,10 +32,7 @@ import java.util.zip.ZipFile
  *  - AMSI (default): expects 16 PNGs per sessionId. Auto-finalises at 16.
  *  - PMFI ZIP (preferred): a ZIP per section (with &mode=pmfi). We detect ZIP by file signature,
  *    Content-Type, or filename extension. We unzip PNGs and finalise a *section* record immediately.
- *    Each section is stored as its own Session row with id key "<sessionId>_<section>".
- *  - PMFI PNG stream (optional): if Pi streams PNGs with &mode=pmfi, we accept + count them,
- *    but *do not automatically finalise* by default (to avoid churn). You can enable timeout-based
- *    auto-finalise if desired (see AUTO_FINALISE_PMFI_STREAM below).
+ *  - PMFI PNG stream (optional): accept + count; no auto-finalise unless enabled below.
  */
 class UploadServer(
     port: Int,
@@ -56,18 +53,33 @@ class UploadServer(
         root
     }
 
+    private data class RunTracker(
+        val runId: String,
+        var iniName: String = "unknown_ini",
+        var lastSeenAt: Long = System.currentTimeMillis(),
+        // sectionIndex -> PNG paths
+        val sectionPngs: MutableMap<Int, MutableList<String>> = ConcurrentHashMap(),
+        // Optional: expected frames per section (if provided by Pi)
+        val expectedFramesPerSection: MutableMap<Int, Int> = ConcurrentHashMap()
+    )
+
+    private val pmfiRuns = ConcurrentHashMap<String, RunTracker>()
+    // We will NOT auto-finalise on idle anymore (to avoid half sessions).
+// Keep the constant if you want, but we won't use it for finalising.
+    private val RUN_IDLE_SWEEP_MS = 30_000L
+
     private val IMAGES_PER_AMSI = 16
     private val SESSION_TIMEOUT_MS = 10 * 60 * 1000L     // clear trackers after 10 min idle
     private val LOCATION_TIMEOUT_MS = 2_000L             // location best-effort
     private val ZIP_SIGNATURES = arrayOf(
-        byteArrayOf(0x50, 0x4B, 0x03, 0x04),            // PK.. (local file header)
-        byteArrayOf(0x50, 0x4B, 0x05, 0x06),            // PK.. (empty archive)
-        byteArrayOf(0x50, 0x4B, 0x07, 0x08)             // PK.. (spanned archive)
+        byteArrayOf(0x50, 0x4B, 0x03, 0x04),
+        byteArrayOf(0x50, 0x4B, 0x05, 0x06),
+        byteArrayOf(0x50, 0x4B, 0x07, 0x08)
     )
 
     // Optional: if you ever stream PMFI PNGs, auto-finalise after idle period (disabled by default)
     private val AUTO_FINALISE_PMFI_STREAM = false
-    private val PMFI_STREAM_IDLE_FINALISE_MS = 20_000L   // 20s of silence => finalise PMFI stream
+    private val PMFI_STREAM_IDLE_FINALISE_MS = 20_000L
 
     // --------------------------------------------------------------------------------------------
     // State / trackers
@@ -75,17 +87,20 @@ class UploadServer(
     private val job = SupervisorJob()
     private val scope = CoroutineScope(Dispatchers.IO + job)
 
-    // AMSI: sessionId -> imagePaths (absolute)
+    // AMSI/PMFI-stream: sessionId -> imagePaths (absolute)
     private val amsiUploads = ConcurrentHashMap<String, MutableList<String>>()
 
     // last activity per logical key (sessionId or sectionKey)
     private val lastSeenAt = ConcurrentHashMap<String, Long>()
 
     // prevent duplicate finalise/insert
-    private val finalisedKeys = Collections.synchronizedSet(mutableSetOf<String>())
+    private val finalisedKeys = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     // prevent duplicate DB inserts (per logical key)
-    private val dbInserted = Collections.synchronizedSet(mutableSetOf<String>())
+    private val dbInserted = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
+    // If you want to access request params from helpers (optional)
+    private val lastRequestParams = object : ThreadLocal<Map<String, String>>() {}
 
     // --------------------------------------------------------------------------------------------
     // Lifecycle
@@ -103,9 +118,13 @@ class UploadServer(
     override fun serve(session: IHTTPSession): Response {
         return try {
             when (session.method) {
-                Method.GET  -> handleGet(session)
+                Method.GET -> handleGet(session)
                 Method.POST -> handlePost(session)
-                else -> newFixedLengthResponse(Response.Status.METHOD_NOT_ALLOWED, MIME_PLAINTEXT, "Method not allowed")
+                else -> newFixedLengthResponse(
+                    Response.Status.METHOD_NOT_ALLOWED,
+                    MIME_PLAINTEXT,
+                    "Method not allowed"
+                )
             }
         } catch (e: Exception) {
             Log.e(TAG, "Serve error: ${e.message}", e)
@@ -113,98 +132,262 @@ class UploadServer(
         }
     }
 
+    private fun touchRun(run: RunTracker) {
+        run.lastSeenAt = System.currentTimeMillis()
+        scope.launch {
+            delay(RUN_IDLE_SWEEP_MS)
+            // no-op: do not finalise on idle
+        }
+    }
+
+    @Synchronized
+    private fun finalizeRunMergeOrInsert(runId: String, run: RunTracker, reason: String) {
+        // Build ordered PNG list
+        val allPngs = run.sectionPngs.entries
+            .sortedBy { it.key }
+            .flatMap { e -> e.value.sorted() }
+
+        if (allPngs.isEmpty()) {
+            Log.w(TAG, "Finalize skipped for $runId (no PNGs).")
+            return
+        }
+
+        val completedAt = System.currentTimeMillis()
+        val tsStr = SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.getDefault()).format(Date(completedAt))
+
+        Log.i(TAG, "Finalising PMFI run '$runId' (${allPngs.size} frames, reason=$reason)")
+
+        scope.launch {
+            try {
+                val dao = AppDatabase.getDatabase(context).sessionDao()
+                val existing = dao.findByRunId(runId)
+
+                if (existing == null) {
+                    // Insert new
+                    dao.upsert(
+                        Session(
+                            createdAt = completedAt,
+                            completedAtMillis = completedAt,
+                            timestamp = tsStr,
+                            location = "Unknown",  // if you prefer fused location, you can call insertSessionAsync instead
+                            imagePaths = allPngs,
+                            type = "PMFI",
+                            label = "PMFI Run",
+                            runId = runId,
+                            iniName = run.iniName,
+                            sectionIndex = null
+                        )
+                    )
+                } else {
+                    // Merge/append new images (ensure uniqueness + order)
+                    val merged = (existing.imagePaths.orEmpty() + allPngs).distinct().sorted()
+                    val updated = existing.copy(
+                        completedAtMillis = completedAt,
+                        timestamp = tsStr,
+                        imagePaths = merged,
+                        iniName = run.iniName ?: existing.iniName
+                    )
+                    dao.update(updated)
+                }
+
+                UploadProgressBus.uploadProgress.postValue(runId to allPngs.size)
+            } catch (e: Exception) {
+                Log.e(TAG, "DB merge/insert error for run=$runId: ${e.message}", e)
+            } finally {
+                pmfiRuns.remove(runId) // clear staging
+            }
+        }
+    }
+
+
     private fun handleGet(session: IHTTPSession): Response {
         return when (session.uri.orEmpty()) {
             "/health" -> ok("OK")
-            "/debug"  -> debugSummary()
-            else      -> notFound("Not found")
+            "/debug" -> debugSummary()
+            else -> notFound("Not found")
         }
     }
 
+    // --------------------------------------------------------------------------------------------
+    // POST /upload
+    // --------------------------------------------------------------------------------------------
     private fun handlePost(session: IHTTPSession): Response {
-        val uri = session.uri.orEmpty()
-        if (uri != "/upload" && uri != "/upload/") return notFound("Unknown endpoint")
+        return try {
+            val files = HashMap<String, String>()
+            session.parseBody(files)
 
-        val files = HashMap<String, String>()
-        session.parseBody(files) // multipart will be written to temp file(s)
+            val params = session.parms
+            lastRequestParams.set(params)
 
-        // sessionId
-        val sessionId = session.parms["sessionId"]
-            ?: session.headers["x-session-id"]
-            ?: return badRequest("Missing sessionId")
+            val tempPath = files["file"] ?: files.values.firstOrNull()
+            ?: return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "missing file part 'file'")
 
-        // mode
-        val isPmfi = session.parms["mode"]?.equals("pmfi", true) == true ||
-                session.headers["x-mode"]?.equals("pmfi", true) == true
+            val mode = (params["mode"] ?: "amsi").lowercase(Locale.US)
+            val sessionId = params["sessionId"] ?: params["sid"] ?: UUID.randomUUID().toString()
+            val sectionTag = params["section"]
 
-        val tmpPath = files.values.firstOrNull() ?: return badRequest("No file payload")
-        val tmpFile = File(tmpPath)
+            val headers = session.headers ?: emptyMap()
+            val contentType = headers["content-type"] ?: ""
+            val fileNameHint = extractFilename(headers["content-disposition"]) ?: params["filename"] ?: "upload.bin"
+            val tmpFile = File(tempPath)
 
-        val incomingName = extractFilename(session.headers["content-disposition"])
-            ?: session.parms["filename"]
-            ?: "upload_${System.currentTimeMillis()}"
-        val safeName = File(incomingName).name
+            // --- PMFI ZIP fast-path ---
+            if (mode == "pmfi" && looksLikeZip(fileNameHint, contentType, tmpFile)) {
+                return handlePmfiZip(
+                    sessionId = (params["runId"] ?: sessionId),
+                    zipFilename = fileNameHint,
+                    tmpFile = tmpFile,
+                    sectionParam = sectionTag
+                )
+            }
 
-        lastSeenAt[sessionId] = System.currentTimeMillis()
+            // --- PMFI PNG STREAM (optional legacy) ---
+            if (mode == "pmfi") {
+                // Keep your existing PMFI-stream behaviour if you still need it
+                val uploadsRoot = File(context.filesDir, "uploads").apply { mkdirs() }
+                val destFile = File(uploadsRoot, "pmfi/${params["runId"] ?: sessionId}")
+                    .apply { mkdirs() }
+                    .let { dir -> File(dir, "upload_${System.currentTimeMillis()}.png") }
 
-        val contentType = (session.headers["content-type"] ?: "").lowercase(Locale.ROOT)
-        val looksZip = looksLikeZip(safeName, contentType, tmpFile)
+                tmpFile.copyTo(destFile, overwrite = true)
+                insertSessionFromUpload(
+                    type = "PMFI",
+                    title = sectionTag ?: "PMFI Section",
+                    runId = params["runId"] ?: sessionId,
+                    iniName = params["ini"],
+                    sectionIndex = params["sectionIndex"]?.toIntOrNull(),
+                    localPath = destFile.absolutePath,
+                    extra = mapOf(
+                        "part" to (params["part"] ?: "000"),
+                        "framesPerSection" to params["framesPerSection"],
+                        "totalFrames" to params["totalFrames"],
+                        "totalSections" to params["totalSections"]
+                    )
+                )
+                // This path is PMFI stream, not AMSI, so return as-is.
+                return ok("OK: saved ${destFile.name}")
+            }
 
-        // For PMFI ZIP, carry section if provided
-        val sectionParam = session.parms["section"]
+            // --- AMSI: use the aggregator that counts to 16 and posts cumulative progress ---
+            // IMPORTANT: pass the *tmpFile* so handlePng() owns the move; do NOT pre-copy here.
+            return handlePng(
+                sessionId = sessionId,
+                filename = fileNameHint.ifBlank { "image_${System.currentTimeMillis()}.png" },
+                tmpFile = tmpFile,
+                isPmfi = false
+            )
 
-        return if (looksZip) {
-            // Treat as PMFI ZIP (regardless of explicit mode) — it's the only sensible meaning
-            handlePmfiZip(sessionId, safeName, tmpFile, sectionParam)
-        } else {
-            // PNG path: AMSI or PMFI stream
-            handlePng(sessionId, safeName, tmpFile, isPmfi)
+        } catch (e: Exception) {
+            Log.e(TAG, "handlePost error: ${e.message}", e)
+            newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "error: ${e.message}")
         }
     }
 
+
+
     // --------------------------------------------------------------------------------------------
-    // Handlers
+    // Legacy/aux handlers (ZIP & PNG streams)
     // --------------------------------------------------------------------------------------------
+    // UploadServer.kt
     private fun handlePmfiZip(
         sessionId: String,
         zipFilename: String,
         tmpFile: File,
         sectionParam: String?
     ): Response {
-        // Derive a section label:
-        // Priority: explicit &section=, else try "<session>_<section>.zip", else "section"
-        val base = zipFilename.removeSuffix(".zip").removeSuffix(".ZIP")
-        val inferred = base.substringAfter("${sessionId}_", missingDelimiterValue = base)
-        val section = (sectionParam ?: inferred).ifBlank { "section" }
-        val sectionKey = "${sessionId}_$section"
+        val q = lastRequestParams.get() ?: emptyMap()
 
-        val sectionDir = File(sessionsRoot, sectionKey).apply { mkdirs() }
-        val savedZip   = File(sectionDir, zipFilename)
+        val rawRunId    = q["runId"] ?: q["x-run-id"] ?: sessionId
+        val iniNameParam = q["ini"] ?: q["iniName"] ?: q["x-ini"]
+        val sectionIndex = q["sectionIndex"]?.toIntOrNull() ?: 0
+        val partParam    = q["part"] ?: ""                    // optional
+        val finalFlag    = (q["final"] == "1")                // we also support auto-finalise by counts
+        // Prefer Pi's section expectation under this key, fall back to older variants
+        val sectionTotalFrames = q["sectionTotalFrames"]?.toIntOrNull()
+            ?: q["sectionFrames"]?.toIntOrNull()
+            ?: q["framesPerSection"]?.toIntOrNull()
 
+        val iniName = iniNameParam?.let { File(it).name } ?: "unknown_ini"
+
+        // -------- Guard: ensure new runs don't merge into an old row with the same runId ----------
+        // -------- Guard: ensure new runs don't merge into an old row with the same runId ----------
+        val dao = AppDatabase.getDatabase(context).sessionDao()
+        val looksLikeRunStart = (sectionIndex == 0) && (partParam.isBlank() || partParam == "001" || partParam == "1")
+
+        val runIdInUse = try {
+            blockingIo { dao.findByRunId(rawRunId) } != null
+        } catch (_: Exception) {
+            false
+        }
+
+
+        val effectiveRunId = if (looksLikeRunStart && runIdInUse && !pmfiRuns.containsKey(rawRunId)) {
+            val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
+            val newId = "${rawRunId}__$stamp"
+            Log.w(TAG, "runId '$rawRunId' already used; starting a NEW run as '$newId'")
+            newId
+        } else {
+            rawRunId
+        }
+
+        // -------- Staging filesystem --------
+        val runFolderName = "${effectiveRunId}__${iniName}"
+        val sectionName = (sectionParam?.ifBlank { null }
+            ?: zipFilename.removeSuffix(".zip").removeSuffix(".ZIP")
+                .substringAfter("${effectiveRunId}_", missingDelimiterValue = "section")
+                .ifBlank { "section" })
+
+        val pmfiRoot   = File(sessionsRoot, "PMFI").apply { mkdirs() }
+        val runDir     = File(pmfiRoot, runFolderName).apply { mkdirs() }
+        val sectionDir = File(runDir, "section_%03d__%s".format(sectionIndex, sectionName)).apply { mkdirs() }
+
+        val savedZip = File(sectionDir, zipFilename)
         try {
             tmpFile.copyTo(savedZip, overwrite = true)
         } finally {
             tmpFile.delete()
         }
 
-        // Unzip all PNGs to sectionDir
-        val extracted = unzipPngs(savedZip, sectionDir)
-        UploadProgressBus.uploadProgress.postValue(sectionKey to extracted.size)
-        Log.i(TAG, "PMFI ZIP saved '$zipFilename' -> ${extracted.size} PNG(s), section='$section'")
+        val extractedPngs = unzipPngs(savedZip, sectionDir)
+        Log.i(TAG, "PMFI ZIP -> run=$effectiveRunId ini=$iniName sec=$sectionIndex part=$partParam files=${extractedPngs.size}")
 
-        // Finalise the section as its own session row
-        if (finalisedKeys.add(sectionKey)) {
-            insertSessionAsync(
-                key = sectionKey,
-                imagePaths = extracted,
-                type = "PMFI",
-                label = section
+        // -------- In-memory aggregate for this run --------
+        val run = pmfiRuns.getOrPut(effectiveRunId) { RunTracker(runId = effectiveRunId) }
+        run.iniName = iniName
+        sectionTotalFrames?.let { run.expectedFramesPerSection[sectionIndex] = it }
+
+        val list = run.sectionPngs.getOrPut(sectionIndex) { synchronizedList(mutableListOf()) }
+        list.addAll(extractedPngs)
+
+        // Progress (total frames across sections so far)
+        val totalSoFar = run.sectionPngs.values.sumOf { it.size }
+        UploadProgressBus.uploadProgress.postValue(effectiveRunId to totalSoFar)
+
+        touchRun(run)
+
+        // Finalise on explicit flag OR when all sections met their expected counts
+        if (finalFlag || allSectionsComplete(run)) {
+            finalizeRunMergeOrInsert(
+                runId = effectiveRunId,
+                run = run,
+                reason = if (finalFlag) "explicit_final_flag" else "all_sections_meet_expected"
             )
         }
 
-        cleanupStaleSessions()
-        return ok("ZIP saved: $zipFilename (${extracted.size} frames)")
+        return ok("ZIP accepted (${extractedPngs.size} frames), run=$effectiveRunId section=$sectionIndex part=$partParam")
     }
+    // Run a suspend block on IO and return the result, from non-suspend code.
+    private fun <T> blockingIo(block: suspend () -> T): T =
+        kotlinx.coroutines.runBlocking { withContext(Dispatchers.IO) { block() } }
+
+    private fun allSectionsComplete(run: RunTracker): Boolean {
+        if (run.expectedFramesPerSection.isEmpty()) return false
+        // Every section that has an expectation must have >= that many PNGs
+        return run.expectedFramesPerSection.all { (sec, expected) ->
+            (run.sectionPngs[sec]?.size ?: 0) >= expected
+        }
+    }
+
 
     private fun handlePng(
         sessionId: String,
@@ -221,21 +404,26 @@ class UploadServer(
             tmpFile.delete()
         }
 
-        // Track PNG count for this logical key
         val list = amsiUploads.getOrPut(sessionId) { synchronizedList(mutableListOf()) }
         list.add(target.absolutePath)
 
+        lastSeenAt[sessionId] = System.currentTimeMillis()
         UploadProgressBus.uploadProgress.postValue(sessionId to list.size)
         Log.i(TAG, "PNG saved: '$filename' (session=$sessionId, count=${list.size}, pmfi=$isPmfi)")
 
-        // AMSI: finalise when exactly 16 files arrive (once)
         if (!isPmfi && list.size == IMAGES_PER_AMSI && finalisedKeys.add(sessionId)) {
-            insertSessionAsync(key = sessionId, imagePaths = list.toList(), type = "AMSI", label = null)
+            val completedAt = System.currentTimeMillis()
+            insertSessionAsync(
+                key = sessionId,
+                imagePaths = list.toList(),
+                type = "AMSI",
+                label = null,
+                completedAtMillis = completedAt
+            )
             amsiUploads.remove(sessionId)
             lastSeenAt.remove(sessionId)
         }
 
-        // Optional: PMFI stream auto-finalise after idle timeout (disabled by default)
         if (isPmfi && AUTO_FINALISE_PMFI_STREAM) {
             schedulePmfiStreamIdleCheck(sessionId)
         }
@@ -248,9 +436,9 @@ class UploadServer(
     // Helpers
     // --------------------------------------------------------------------------------------------
     private fun looksLikeZip(name: String, contentType: String, tmpFile: File): Boolean {
-        val byExt  = name.lowercase(Locale.ROOT).endsWith(".zip")
+        val byExt = name.lowercase(Locale.ROOT).endsWith(".zip")
         val byType = contentType.contains("application/zip")
-        val bySig  = isZipBySignature(tmpFile)
+        val bySig = isZipBySignature(tmpFile)
         return byExt || byType || bySig
     }
 
@@ -260,11 +448,12 @@ class UploadServer(
             if (ins.read(sig) != 4) return false
             ZIP_SIGNATURES.any { z -> z[0] == sig[0] && z[1] == sig[1] && z[2] == sig[2] && z[3] == sig[3] }
         }
-    } catch (_: Exception) { false }
+    } catch (_: Exception) {
+        false
+    }
 
     private fun extractFilename(contentDisposition: String?): String? {
         if (contentDisposition.isNullOrBlank()) return null
-        // Content-Disposition: form-data; name="file"; filename="foo.png"
         return contentDisposition.split(";")
             .map { it.trim() }
             .firstOrNull { it.startsWith("filename=", ignoreCase = true) }
@@ -298,11 +487,17 @@ class UploadServer(
             delay(PMFI_STREAM_IDLE_FINALISE_MS)
             val last = lastSeenAt[key] ?: return@launch
             if (System.currentTimeMillis() - last >= PMFI_STREAM_IDLE_FINALISE_MS) {
-                // Finalise PMFI stream session if not yet inserted
                 if (finalisedKeys.add(key)) {
                     val paths = amsiUploads[key]?.toList().orEmpty()
                     if (paths.isNotEmpty()) {
-                        insertSessionAsync(key = key, imagePaths = paths, type = "PMFI", label = "stream")
+                        val completedAt = System.currentTimeMillis()
+                        insertSessionAsync(
+                            key = key,
+                            imagePaths = paths,
+                            type = "PMFI",
+                            label = "stream",
+                            completedAtMillis = completedAt
+                        )
                     }
                     amsiUploads.remove(key)
                     lastSeenAt.remove(key)
@@ -327,16 +522,21 @@ class UploadServer(
 
     // --------------------------------------------------------------------------------------------
     // DB insert with best-effort location (duplicate-safe)
+    // (single, canonical inserter used by all paths)
     // --------------------------------------------------------------------------------------------
     private fun insertSessionAsync(
-        key: String,                        // logical key: sessionId or "<sessionId>_<section>"
+        key: String,
         imagePaths: List<String>,
         type: String,
-        label: String?
+        label: String?,
+        completedAtMillis: Long = System.currentTimeMillis(),
+        runId: String? = null,
+        iniName: String? = null,
+        sectionIndex: Int? = null
     ) {
-        val timestamp = SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.getDefault()).format(Date())
+        val tsStr = SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.getDefault())
+            .format(Date(completedAtMillis))
 
-        // Skip if already inserted
         if (!dbInserted.add(key)) {
             Log.i(TAG, "Session '$key' already inserted; skipping.")
             return
@@ -347,7 +547,17 @@ class UploadServer(
         val fallbackJob = scope.launch {
             delay(LOCATION_TIMEOUT_MS)
             Log.w(TAG, "Location timeout; inserting '$key' with Unknown.")
-            saveSessionToDb(timestamp, "Unknown", imagePaths, type, label)
+            saveSessionToDb(
+                completedAtMillis = completedAtMillis,
+                timestampStr = tsStr,
+                locationStr = "Unknown",
+                imagePaths = imagePaths,
+                type = type,
+                label = label,
+                runId = runId,
+                iniName = iniName,
+                sectionIndex = sectionIndex
+            )
         }
 
         try {
@@ -363,54 +573,128 @@ class UploadServer(
                                 val city = a.locality ?: ""
                                 val area = a.subAdminArea ?: ""
                                 val country = a.countryName ?: ""
-                                val place = listOf(city, area, country).filter { s -> s.isNotBlank() }.joinToString(", ")
-                                if (place.isNotBlank()) place else "${it.latitude},${it.longitude}"
+                                listOf(city, area, country).filter { s -> s.isNotBlank() }
+                                    .joinToString(", ")
+                                    .ifBlank { "${it.latitude},${it.longitude}" }
                             } else "${it.latitude},${it.longitude}"
                         } catch (_: Exception) {
                             "${it.latitude},${it.longitude}"
                         }
                     } ?: "Unknown"
-                    saveSessionToDb(timestamp, locationStr, imagePaths, type, label)
+                    saveSessionToDb(
+                        completedAtMillis = completedAtMillis,
+                        timestampStr = tsStr,
+                        locationStr = locationStr,
+                        imagePaths = imagePaths,
+                        type = type,
+                        label = label,
+                        runId = runId,
+                        iniName = iniName,
+                        sectionIndex = sectionIndex
+                    )
                 }
                 .addOnFailureListener { err ->
                     fallbackJob.cancel()
                     Log.w(TAG, "lastLocation failed: ${err.message}. Inserting Unknown for '$key'")
-                    saveSessionToDb(timestamp, "Unknown", imagePaths, type, label)
+                    saveSessionToDb(
+                        completedAtMillis = completedAtMillis,
+                        timestampStr = tsStr,
+                        locationStr = "Unknown",
+                        imagePaths = imagePaths,
+                        type = type,
+                        label = label,
+                        runId = runId,
+                        iniName = iniName,
+                        sectionIndex = sectionIndex
+                    )
                 }
         } catch (e: Exception) {
             fallbackJob.cancel()
             Log.w(TAG, "Location flow error: ${e.message}. Inserting Unknown for '$key'")
-            saveSessionToDb(timestamp, "Unknown", imagePaths, type, label)
+            saveSessionToDb(
+                completedAtMillis = completedAtMillis,
+                timestampStr = tsStr,
+                locationStr = "Unknown",
+                imagePaths = imagePaths,
+                type = type,
+                label = label,
+                runId = runId,
+                iniName = iniName,
+                sectionIndex = sectionIndex
+            )
         }
     }
 
     private fun saveSessionToDb(
-        timestamp: String,
+        completedAtMillis: Long,
+        timestampStr: String,
         locationStr: String,
         imagePaths: List<String>,
         type: String,
-        label: String?
+        label: String?,
+        runId: String? = null,
+        iniName: String? = null,
+        sectionIndex: Int? = null
     ) {
         scope.launch {
             try {
-                AppDatabase.getDatabase(context).sessionDao().insert(
+                AppDatabase.getDatabase(context).sessionDao().upsert(
                     Session(
-                        timestamp = timestamp,
+                        createdAt = completedAtMillis,
+                        completedAtMillis = completedAtMillis,
+                        timestamp = timestampStr,
                         location = locationStr,
                         imagePaths = imagePaths,
                         type = type,
-                        label = label
+                        label = label,
+                        runId = runId,
+                        iniName = iniName,
+                        sectionIndex = sectionIndex
                     )
                 )
-                Log.i(TAG, "Inserted $type session (${imagePaths.size} images) @ $locationStr label=$label")
+                Log.i(
+                    TAG,
+                    "Inserted $type session (${imagePaths.size} images) run=$runId ini=$iniName label=$label idx=$sectionIndex"
+                )
             } catch (e: Exception) {
                 Log.e(TAG, "DB insert error: ${e.message}", e)
             }
         }
     }
 
+    /**
+     * Helper for single-file uploads (ZIP/PNG) that builds a unique key and delegates to insertSessionAsync(...)
+     */
+    private fun insertSessionFromUpload(
+        type: String,
+        title: String,
+        runId: String?,
+        iniName: String?,
+        sectionIndex: Int?,
+        localPath: String,
+        extra: Map<String, String?> = emptyMap()
+    ) {
+        val part = extra["part"] ?: "000"
+        val key = if (type.equals("PMFI", ignoreCase = true)) {
+            "${(runId ?: UUID.randomUUID().toString())}__sec${sectionIndex ?: 0}__part$part"
+        } else {
+            runId ?: UUID.randomUUID().toString()
+        }
+
+        insertSessionAsync(
+            key = key,
+            imagePaths = listOf(localPath),
+            type = type,
+            label = title,
+            completedAtMillis = System.currentTimeMillis(),
+            runId = runId,
+            iniName = iniName,
+            sectionIndex = sectionIndex
+        )
+    }
+
     // --------------------------------------------------------------------------------------------
-    // Responses
+    // Responses & debug
     // --------------------------------------------------------------------------------------------
     private fun ok(msg: String) =
         newFixedLengthResponse(Response.Status.OK, MIME_PLAINTEXT, msg)
@@ -426,15 +710,11 @@ class UploadServer(
             appendLine("UploadServer Debug")
             appendLine("Root: ${sessionsRoot.absolutePath}")
             appendLine()
-            sessionsRoot.listFiles()?.sortedBy { it.name }?.forEach { dir ->
-                if (dir.isDirectory) {
-                    appendLine("• ${dir.name}")
-                    dir.listFiles()?.filter { it.isFile }?.sortedBy { it.name }?.take(5)?.forEach { f ->
-                        appendLine("   - ${f.name}  (${f.length()} bytes)")
-                    }
-                    val more = (dir.listFiles()?.size ?: 0) - 5
-                    if (more > 0) appendLine("   - ... +$more more")
-                }
+            appendLine("PMFI runs in staging:")
+            pmfiRuns.values.forEach { r ->
+                val secList = r.sectionPngs.entries.sortedBy { it.key }
+                    .joinToString { "sec${it.key}:${it.value.size}" }
+                appendLine("  - ${r.runId} ini=${r.iniName} pngs=${r.sectionPngs.values.sumOf { it.size }} [$secList]")
             }
             appendLine()
             appendLine("Trackers:")
@@ -445,4 +725,5 @@ class UploadServer(
         }
         return ok(b.toString())
     }
+
 }

@@ -11,6 +11,7 @@ import androidx.room.PrimaryKey
 data class CalibrationProfile(
     @PrimaryKey(autoGenerate = true) val id: Long = 0,
     val createdAt: Long,
+    val updatedAtMillis: Long? = null,
     val name: String,             // e.g. "White-balance", "Radiometric v1"
     val summary: String?,         // small text like "ΔE=1.8, gain=1.12"
     val previewPath: String?,      // optional image path for thumbnail"

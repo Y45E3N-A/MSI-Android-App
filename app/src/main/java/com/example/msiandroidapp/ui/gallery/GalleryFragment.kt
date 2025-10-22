@@ -40,7 +40,7 @@ import java.util.zip.ZipOutputStream
 class GalleryFragment : Fragment() {
 
     // ---- filter model ----
-    private enum class ResultsFilter { ALL, SESSIONS, CALIBRATIONS }
+    private enum class ResultsFilter { ALL, AMSI, PMFI, CALIBRATIONS }
     private var currentFilter: ResultsFilter = ResultsFilter.ALL
     private val STATE_FILTER_KEY = "results_filter"
 
@@ -60,10 +60,6 @@ class GalleryFragment : Fragment() {
     private lateinit var backCallback: OnBackPressedCallback
 
     // Cached toolbar items
-    private var menuItemRenameInline: MenuItem? = null
-    private var filterAllItem: MenuItem? = null
-    private var filterSessionsItem: MenuItem? = null
-    private var filterCalibsItem: MenuItem? = null
 
     private val AMSI_WAVELENGTHS = intArrayOf(
         395, 415, 450, 470, 505, 528, 555, 570, 590, 610, 625, 640, 660, 730, 850, 880
@@ -143,7 +139,7 @@ class GalleryFragment : Fragment() {
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         galleryViewModel.results.observe(viewLifecycleOwner) { list ->
-            val filteredSorted = applyFilterAndSort(list)
+            val filteredSorted = applyFilterOnly(list)
             submitMerged(filteredSorted)
             reconcileSelectionWith(adapter.currentList)
         }
@@ -156,7 +152,7 @@ class GalleryFragment : Fragment() {
         ).forEach { live ->
             live.observe(viewLifecycleOwner) {
                 val base = galleryViewModel.results.value ?: emptyList()
-                submitMerged(applyFilterAndSort(base))
+                submitMerged(applyFilterOnly(base))
             }
         }
     }
@@ -165,11 +161,16 @@ class GalleryFragment : Fragment() {
     override fun onCreateOptionsMenu(menu: Menu, inflater: MenuInflater) {
         inflater.inflate(R.menu.menu_gallery_selection, menu)
         menuItemRenameInline = menu.findItem(R.id.action_rename_inline)
-        filterAllItem = menu.findItem(R.id.filter_all)
-        filterSessionsItem = menu.findItem(R.id.filter_sessions)
-        filterCalibsItem = menu.findItem(R.id.filter_calibrations)
+
+        // NEW filter items
+        filterAllItem     = menu.findItem(R.id.filter_all)
+        filterAmsiItem    = menu.findItem(R.id.filter_amsi)
+        filterPmfiItem    = menu.findItem(R.id.filter_pmfi)
+        filterCalibsItem  = menu.findItem(R.id.filter_calibrations)
+
         super.onCreateOptionsMenu(menu, inflater)
     }
+
 
     override fun onPrepareOptionsMenu(menu: Menu) {
         val share  = menu.findItem(R.id.action_share_selected)
@@ -179,49 +180,48 @@ class GalleryFragment : Fragment() {
         share?.isVisible  = inSelectionMode
         delete?.isVisible = inSelectionMode
         cancel?.isVisible = inSelectionMode
-
         menuItemRenameInline?.isVisible = inSelectionMode && selectedIds.size == 1
 
-        filterAllItem?.isChecked = currentFilter == ResultsFilter.ALL
-        filterSessionsItem?.isChecked = currentFilter == ResultsFilter.SESSIONS
+        filterAllItem?.isChecked    = currentFilter == ResultsFilter.ALL
+        filterAmsiItem?.isChecked   = currentFilter == ResultsFilter.AMSI
+        filterPmfiItem?.isChecked   = currentFilter == ResultsFilter.PMFI
         filterCalibsItem?.isChecked = currentFilter == ResultsFilter.CALIBRATIONS
 
         super.onPrepareOptionsMenu(menu)
     }
 
+
     override fun onOptionsItemSelected(item: MenuItem): Boolean = when (item.itemId) {
-        // selection actions
+        // selection actions...
         R.id.action_select_all       -> { selectAllVisible(); true }
         R.id.action_share_selected   -> { shareSelected(); true }
         R.id.action_delete_selected  -> { deleteSelected(); true }
         R.id.action_cancel_selection -> { clearSelectionAndExitMode(); true }
         R.id.action_rename_inline    -> { promptRenameSelected(); true }
 
-        // filter actions
+        // NEW filters
         R.id.filter_all -> {
-            setFilter(ResultsFilter.ALL)
-            item.isChecked = true
-            true
+            setFilter(ResultsFilter.ALL); item.isChecked = true; true
         }
-        R.id.filter_sessions -> {
-            setFilter(ResultsFilter.SESSIONS)
-            item.isChecked = true
-            true
+        R.id.filter_amsi -> {
+            setFilter(ResultsFilter.AMSI); item.isChecked = true; true
+        }
+        R.id.filter_pmfi -> {
+            setFilter(ResultsFilter.PMFI); item.isChecked = true; true
         }
         R.id.filter_calibrations -> {
-            setFilter(ResultsFilter.CALIBRATIONS)
-            item.isChecked = true
-            true
+            setFilter(ResultsFilter.CALIBRATIONS); item.isChecked = true; true
         }
 
         else -> super.onOptionsItemSelected(item)
     }
 
+
     private fun setFilter(f: ResultsFilter) {
         if (currentFilter == f) return
         currentFilter = f
         val base = galleryViewModel.results.value ?: emptyList()
-        submitMerged(applyFilterAndSort(base), forceHideInProgress = true)
+        submitMerged(applyFilterOnly(base), forceHideInProgress = true)
         clearSelectionAndExitMode()
     }
 
@@ -230,21 +230,32 @@ class GalleryFragment : Fragment() {
     }
 
     // ---------- Filtering + newest-first sorting ----------
-    private fun applyFilterAndSort(list: List<ResultListItem>): List<ResultListItem> {
-        val filtered = when (currentFilter) {
+    // ---------- Filtering + newest-first sorting ----------
+    private fun applyFilterOnly(list: List<ResultListItem>): List<ResultListItem> =
+        when (currentFilter) {
             ResultsFilter.ALL -> list.filter { it !is ResultListItem.InProgress }
-            ResultsFilter.SESSIONS -> list.filter { it is ResultListItem.SessionItem }
+
+            ResultsFilter.AMSI -> list.filter { item ->
+                when (item) {
+                    is ResultListItem.SessionItem     -> item.session.isAMSI()
+                    is ResultListItem.CalibrationItem -> false
+                    is ResultListItem.InProgress      -> false
+                }
+            }
+
+            ResultsFilter.PMFI -> list.filter { item ->
+                when (item) {
+                    is ResultListItem.SessionItem     -> item.session.isPMFI()
+                    is ResultListItem.CalibrationItem -> false
+                    is ResultListItem.InProgress      -> false
+                }
+            }
+
             ResultsFilter.CALIBRATIONS -> list.filter { it is ResultListItem.CalibrationItem }
         }
 
-        return filtered.sortedByDescending { item ->
-            when (item) {
-                is ResultListItem.SessionItem     -> sortTimestampForSession(item.session)
-                is ResultListItem.CalibrationItem -> item.profile.createdAt
-                is ResultListItem.InProgress      -> Long.MIN_VALUE // not present due to filter
-            }
-        }
-    }
+    private fun Session.isAMSI(): Boolean = type.equals("AMSI", ignoreCase = true)
+    private fun Session.isPMFI(): Boolean = type.equals("PMFI", ignoreCase = true)
 
     private fun sortTimestampForSession(session: Session): Long {
         val parsed = runCatching { parseSessionDate(session.timestamp).time }.getOrNull()
@@ -258,6 +269,12 @@ class GalleryFragment : Fragment() {
     private fun idForCalibration(p: CalibrationProfile) = 1_000_000_000_000L + p.id
     private fun isCalibrationId(id: Long) = id >= 1_000_000_000_000L
     private fun calibIdFromSelId(id: Long) = id - 1_000_000_000_000L
+    // Cached toolbar items
+    private var menuItemRenameInline: MenuItem? = null
+    private var filterAllItem: MenuItem? = null
+    private var filterAmsiItem: MenuItem? = null
+    private var filterPmfiItem: MenuItem? = null
+    private var filterCalibsItem: MenuItem? = null
 
     private fun enterSelectionMode() {
         inSelectionMode = true
@@ -330,7 +347,7 @@ class GalleryFragment : Fragment() {
         } else if (imageCount == 16 && bitmaps.any { it != null }) {
             handler.postDelayed({
                 val base = galleryViewModel.results.value ?: emptyList()
-                submitMerged(applyFilterAndSort(base), forceHideInProgress = true)
+                submitMerged(applyFilterOnly(base), forceHideInProgress = true)
             }, 1500)
             ResultListItem.InProgress(bitmaps, imageCount)
         } else null
@@ -800,8 +817,18 @@ class GalleryFragment : Fragment() {
         val latLon = (session.location).trim().ifEmpty { "Unknown" }
         val dt = parseSessionDate(session.timestamp)
         val ts = SimpleDateFormat("| dd-MM-yyyy | HH:mm:ss", Locale.getDefault()).format(dt)
-        return "$latLon — $ts"
+
+        val pmfiBits = if (session.type.equals("PMFI", true)) {
+            val ini = session.iniName?.let { "INI: $it" } ?: ""
+            val sec = session.label?.let { "Section: $it" } ?: ""
+            val idx = session.sectionIndex?.let { "#$it" } ?: ""
+            listOf(ini, sec, idx).filter { it.isNotBlank() }.joinToString(" • ")
+        } else null
+
+        val right = listOfNotNull(pmfiBits, latLon.takeIf { it != "Unknown" } ).joinToString(" • ").ifBlank { latLon }
+        return if (right.isNotBlank()) "$right $ts" else ts
     }
+
 
     private fun defaultSessionTitle(session: Session): String = "Session ${session.id}"
 

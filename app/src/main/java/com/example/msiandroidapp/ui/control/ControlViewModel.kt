@@ -36,6 +36,40 @@ class ControlViewModel : ViewModel() {
         imageCount.postValue(count)
         if (count == 16) sessionComplete.postValue(true)
     }
+    fun resetToIdle() {
+        // --- AMSI capture ---
+        capturedBitmaps.postValue(MutableList(16) { null })
+        imageCount.postValue(0)
+        isCapturing.postValue(false)
+        sessionComplete.postValue(false)
+
+        // --- PMFI (global + per-section) ---
+        pmfiTotalFrames.postValue(0)
+        pmfiDoneFrames.postValue(0)
+        pmfiPercent.postValue(0)
+        pmfiCurrentSection.postValue(null)
+        pmfiFps.postValue(null)
+        pmfiEta.postValue(null)
+        pmfiSectionFrames.postValue(0)
+        pmfiSectionState.postValue(null)
+        pmfiComplete.postValue(false)
+        pmfiLogLine.postValue(null)
+        pmfiSectionIndex.postValue(0)
+        pmfiSectionCount.postValue(0)
+        pmfiSectionDone.postValue(0)
+        pmfiSectionTotal.postValue(0)
+        pmfiSectionPercent.postValue(0)
+        pmfiSectionInfo.postValue(null)
+
+        // --- Calibration ---
+        isCalibrating.postValue(false)
+        calChannelIndex.postValue(0)
+        calTotalChannels.postValue(16)
+        calWavelengthNm.postValue(null)
+        calAverageIntensity.postValue(null)
+        calNormPrev.postValue(null)
+        calNormNew.postValue(null)
+    }
 
     fun resetCapture() {
         capturedBitmaps.postValue(MutableList(16) { null })

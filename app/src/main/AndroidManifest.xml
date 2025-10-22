@@ -33,6 +33,11 @@
         <activity
             android:name=".ui.gallery.SessionDetailActivity"
             android:exported="false" />
+        <activity
+            android:name=".ui.pmfi.PmfiEditorActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize"
+            android:theme="@style/Theme.MaterialComponents.DayNight.NoActionBar"/>
 
         <activity
             android:name=".MainActivity"

@@ -15,6 +15,12 @@ import androidx.recyclerview.widget.RecyclerView
 import com.example.msiandroidapp.R
 import com.example.msiandroidapp.data.CalibrationProfile
 import com.example.msiandroidapp.data.Session
+import java.text.ParseException
+import java.text.SimpleDateFormat
+import java.time.Instant
+import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 class ResultsAdapter(
     private val onSessionClick: (Session) -> Unit,
@@ -58,13 +64,11 @@ class ResultsAdapter(
         val shouldBeInSelectionMode = fresh.isNotEmpty()
         if (inSelectionMode != shouldBeInSelectionMode) {
             inSelectionMode = shouldBeInSelectionMode
-            // Rebind all to show/hide the checkbox icons.
             notifyItemRangeChanged(0, itemCount, PAYLOAD_SELECTION)
         }
 
         onSelectionChanged?.invoke(fresh.isNotEmpty(), fresh.size)
     }
-
 
     fun getSelection(): Set<Long> = selectedIds
     fun isInSelectionMode(): Boolean = inSelectionMode
@@ -100,6 +104,38 @@ class ResultsAdapter(
 
             override fun areContentsTheSame(old: ResultListItem, new: ResultListItem): Boolean = old == new
         }
+
+        // --- Time formatters (no hardcoded timezone; use device default e.g. Europe/London) ---
+        private val DISPLAY_FMT: DateTimeFormatter =
+            DateTimeFormatter.ofPattern("EEE, dd MMM yyyy • HH:mm")
+        private val LEGACY_PARSE = SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.getDefault())
+    }
+
+    // ---- time helpers ----
+    private fun Long.toDisplayString(): String {
+        val dt = Instant.ofEpochMilli(this).atZone(ZoneId.systemDefault())
+        return DISPLAY_FMT.format(dt)
+    }
+
+    private fun parseLegacyTimestamp(ts: String?): Long? {
+        if (ts.isNullOrBlank()) return null
+        return try {
+            LEGACY_PARSE.parse(ts)?.time
+        } catch (_: ParseException) {
+            null
+        }
+    }
+
+    private fun buildSessionSubtitle(session: Session): String {
+        // Prefer createdAt (epoch). If missing/0, fallback to parsing legacy "timestamp".
+        val millis = when {
+            session.createdAt > 0L -> session.createdAt
+            else -> parseLegacyTimestamp(session.timestamp) ?: 0L
+        }
+
+        val timePart = if (millis > 0L) millis.toDisplayString() else (session.timestamp.ifBlank { "—" })
+        val loc = session.location.trim()
+        return if (loc.isNotEmpty() && loc != "Unknown") "$timePart • $loc" else timePart
     }
 
     override fun getItemViewType(position: Int): Int = when (getItem(position)) {
@@ -199,6 +235,7 @@ class ResultsAdapter(
             }
         }
     }
+
     inner class SessionVH(view: View) : RecyclerView.ViewHolder(view) {
         private val title: TextView = view.findViewById(R.id.completed_title)
         private val subtitle: TextView = view.findViewById(R.id.completed_subtitle)
@@ -213,12 +250,15 @@ class ResultsAdapter(
             inSelection: Boolean
         ) {
             val session = item.session
-            title.text = displayNameProvider.titleFor(session)
-            subtitle.text = displayNameProvider.subtitleFor(session)
 
-            // --- New: badge style + color based on type ---
-            val type = session.type.uppercase()
-            when (type) {
+            // Title still provided by your DisplayNameProvider
+            title.text = displayNameProvider.titleFor(session)
+
+            // ✅ Subtitle built from per-row timestamp (createdAt → fallback to legacy string)
+            subtitle.text = buildSessionSubtitle(session)
+
+            // --- badge style + color based on type ---
+            when (session.type.uppercase()) {
                 "PMFI" -> {
                     badge.text = "PMFI"
                     badge.setBackgroundResource(R.drawable.bg_badge_pmfi)
@@ -228,7 +268,7 @@ class ResultsAdapter(
                     badge.setBackgroundResource(R.drawable.bg_badge_amsi)
                 }
                 else -> {
-                    badge.text = type
+                    badge.text = session.type.uppercase()
                     badge.setBackgroundResource(R.drawable.bg_badge_default)
                 }
             }
@@ -242,6 +282,7 @@ class ResultsAdapter(
 
         fun bindTitleOnly(item: ResultListItem.SessionItem) {
             title.text = displayNameProvider.titleFor(item.session)
+            // subtitle remains unchanged on title-only updates
         }
 
         fun applySelectionVisuals(selected: Boolean, inSelection: Boolean) {
@@ -276,7 +317,7 @@ class ResultsAdapter(
             title.text = displayNameProvider.titleFor(cal)
             subtitle.text = cal.summary ?: "Calibration saved"
 
-            // --- New: consistent orange calibration badge ---
+            // --- consistent orange calibration badge ---
             badge.text = "CALIBRATION"
             badge.setBackgroundResource(R.drawable.bg_badge_calib)
 
@@ -289,6 +330,7 @@ class ResultsAdapter(
 
         fun bindTitleOnly(item: ResultListItem.CalibrationItem) {
             title.text = displayNameProvider.titleFor(item.profile)
+            // keep subtitle as-is
         }
 
         fun applySelectionVisuals(selected: Boolean, inSelection: Boolean) {
@@ -305,8 +347,4 @@ class ResultsAdapter(
             )
         }
     }
-
-
-
-
 }

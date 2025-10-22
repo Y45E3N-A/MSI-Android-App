@@ -6,13 +6,69 @@
     android:layout_height="match_parent"
     android:orientation="vertical">
 
-    <!-- Controls (top) -->
+    <!-- =========================
+         TOP BAR: Title + Env chips
+         ========================= -->
+    <LinearLayout
+        android:id="@+id/topBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="12dp"
+        android:paddingBottom="8dp">
+
+        <!-- Title -->
+        <TextView
+            android:id="@+id/titleText"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="MFI Android App"
+            android:textStyle="bold"
+            android:textSize="22sp" />
+
+        <!-- Temperature chip (live) -->
+        <com.google.android.material.chip.Chip
+            android:id="@+id/topTempChip"
+            style="@style/Widget.MaterialComponents.Chip.Choice"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Temp: —"
+            app:chipIconVisible="false"
+            app:chipMinHeight="32dp"
+            app:chipCornerRadius="16dp"
+            app:checkedIconVisible="false" />
+
+        <Space
+            android:layout_width="8dp"
+            android:layout_height="0dp" />
+
+        <!-- Humidity chip (live) -->
+        <com.google.android.material.chip.Chip
+            android:id="@+id/topHumChip"
+            style="@style/Widget.MaterialComponents.Chip.Choice"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="RH: —"
+            app:chipIconVisible="false"
+            app:chipMinHeight="32dp"
+            app:chipCornerRadius="16dp"
+            app:checkedIconVisible="false" />
+    </LinearLayout>
+
+    <!-- =========================
+         TOP: CONTROLS (scrollable)
+         ========================= -->
     <ScrollView
         android:id="@+id/controls_scrollview"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:fillViewport="true">
+        android:fillViewport="true"
+        android:fadeScrollbars="false">
 
         <LinearLayout
             android:id="@+id/controls_container"
@@ -22,7 +78,7 @@
             android:padding="16dp"
             android:gravity="center_horizontal">
 
-            <!-- Power / Calibrate -->
+            <!-- ===== Power / Calibrate ===== -->
             <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -34,7 +90,8 @@
                     android:id="@+id/buttonShutdown"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Shutdown" />
+                    android:text="Shutdown"
+                    android:contentDescription="Shutdown the instrument" />
 
                 <Space
                     android:layout_width="12dp"
@@ -44,10 +101,11 @@
                     android:id="@+id/buttonCalibrate"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:text="Calibrate" />
+                    android:text="Calibrate"
+                    android:contentDescription="Start calibration" />
             </LinearLayout>
 
-            <!-- IP entry -->
+            <!-- ===== IP entry ===== -->
             <com.google.android.material.textfield.TextInputLayout
                 android:id="@+id/ipInputLayout"
                 style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
@@ -69,7 +127,7 @@
                     android:contentDescription="IP address input" />
             </com.google.android.material.textfield.TextInputLayout>
 
-            <!-- Connect / Disconnect -->
+            <!-- ===== Connect / Disconnect ===== -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -82,7 +140,8 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Connect" />
+                    android:text="Connect"
+                    android:contentDescription="Connect to Raspberry Pi" />
 
                 <Space
                     android:layout_width="12dp"
@@ -93,23 +152,25 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Disconnect" />
+                    android:text="Disconnect/Abort"
+                    android:contentDescription="Disconnect or abort current operation" />
             </LinearLayout>
 
-            <!-- Connection indicator -->
+            <!-- ===== Connection indicator ===== -->
             <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:orientation="horizontal"
                 android:gravity="center_vertical"
-                android:layout_marginBottom="16dp">
+                android:layout_marginBottom="8dp">
 
                 <View
                     android:id="@+id/piConnectionDot"
                     android:layout_width="16dp"
                     android:layout_height="16dp"
                     android:background="@drawable/circle_grey"
-                    android:layout_marginEnd="8dp" />
+                    android:layout_marginEnd="8dp"
+                    android:contentDescription="Pi connection status dot" />
 
                 <TextView
                     android:id="@+id/piConnectionStatus"
@@ -119,23 +180,48 @@
                     android:textSize="16sp" />
             </LinearLayout>
 
+            <!-- Hidden legacy env labels (kept for compatibility with binding) -->
+            <LinearLayout
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal"
+                android:visibility="gone">
+
+                <TextView
+                    android:id="@+id/envTempText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Temp: —" />
+
+                <Space
+                    android:layout_width="16dp"
+                    android:layout_height="0dp" />
+
+                <TextView
+                    android:id="@+id/envHumidityText"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="RH: —" />
+            </LinearLayout>
+
             <TextView
                 android:id="@+id/lastPiButtonText"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="MSI Button Pressed: --"
+                android:text="MFI Button Pressed: --"
                 android:textSize="18sp"
                 android:layout_marginBottom="20dp" />
 
-            <!-- AMSI -->
+            <!-- ===== AMSI ===== -->
             <Button
                 android:id="@+id/buttonStartAmsi"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:text="Start AMSI"
-                android:layout_marginBottom="12dp" />
+                android:layout_marginBottom="12dp"
+                android:contentDescription="Start AMSI capture" />
 
-            <!-- Live preview -->
+            <!-- ===== Live preview toggle ===== -->
             <Switch
                 android:id="@+id/switch_camera_preview"
                 android:layout_width="match_parent"
@@ -143,9 +229,10 @@
                 android:text="Camera Preview"
                 android:textOn="Camera Preview ON"
                 android:textOff="Camera Preview OFF"
-                android:layout_marginBottom="16dp" />
+                android:layout_marginBottom="16dp"
+                android:contentDescription="Toggle live camera preview" />
 
-            <!-- AMSI progress -->
+            <!-- ===== AMSI progress ===== -->
             <ProgressBar
                 android:id="@+id/captureProgressBar"
                 style="?android:attr/progressBarStyleHorizontal"
@@ -162,7 +249,7 @@
                 android:visibility="gone"
                 android:layout_marginBottom="20dp" />
 
-            <!-- Calibration progress -->
+            <!-- ===== Calibration progress ===== -->
             <ProgressBar
                 android:id="@+id/calProgressBar"
                 style="?android:attr/progressBarStyleHorizontal"
@@ -178,7 +265,9 @@
                 android:text=""
                 android:visibility="gone" />
 
-            <!-- PMFI (INI-only) -->
+            <!-- ===============================
+                 PMFI (INI-only) + Expand button
+                 =============================== -->
             <TextView
                 android:id="@+id/pmfiHeader"
                 android:layout_width="match_parent"
@@ -189,26 +278,48 @@
                 android:layout_marginTop="16dp"
                 android:layout_marginBottom="6dp" />
 
-            <com.google.android.material.textfield.TextInputLayout
-                android:id="@+id/pmfiIniLayout"
-                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+            <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                app:boxBackgroundMode="outline"
-                app:endIconMode="clear_text">
+                android:orientation="horizontal"
+                android:gravity="center_vertical"
+                android:layout_marginBottom="12dp">
 
-                <com.google.android.material.textfield.TextInputEditText
-                    android:id="@+id/pmfiIniEdit"
-                    android:layout_width="match_parent"
-                    android:layout_height="140dp"
-                    android:gravity="top|start"
-                    android:hint="Paste your [pmfi] INI here"
-                    android:inputType="textMultiLine"
-                    android:overScrollMode="always"
-                    android:scrollbars="vertical" />
-            </com.google.android.material.textfield.TextInputLayout>
+                <com.google.android.material.textfield.TextInputLayout
+                    android:id="@+id/pmfiIniLayout"
+                    style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    app:boxBackgroundMode="outline"
+                    app:endIconMode="clear_text">
 
+                    <com.google.android.material.textfield.TextInputEditText
+                        android:id="@+id/pmfiIniEdit"
+                        android:layout_width="match_parent"
+                        android:layout_height="140dp"
+                        android:gravity="top|start"
+                        android:hint="Paste your [pmfi] INI here"
+                        android:inputType="textMultiLine"
+                        android:overScrollMode="always"
+                        android:scrollbars="vertical"
+                        android:contentDescription="PMFI INI text input" />
+                </com.google.android.material.textfield.TextInputLayout>
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/pmfiExpandBtn"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Expand"
+                    android:layout_marginStart="8dp"
+                    android:minWidth="0dp"
+                    android:paddingStart="12dp"
+                    android:paddingEnd="12dp"
+                    android:contentDescription="Open full-screen PMFI INI editor" />
+            </LinearLayout>
+
+            <!-- ===== PMFI actions ===== -->
             <LinearLayout
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
@@ -220,7 +331,8 @@
                     android:layout_width="0dp"
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
-                    android:text="Upload INI" />
+                    android:text="Upload INI"
+                    android:contentDescription="Upload PMFI INI to Pi" />
 
                 <Space
                     android:layout_width="8dp"
@@ -232,10 +344,11 @@
                     android:layout_height="wrap_content"
                     android:layout_weight="1"
                     android:text="Start PMFI"
-                    android:enabled="false" />
+                    android:enabled="false"
+                    android:contentDescription="Start PMFI run" />
             </LinearLayout>
 
-            <!-- PMFI status strip (GLOBAL progress) -->
+            <!-- ===== PMFI status strip (GLOBAL progress) ===== -->
             <LinearLayout
                 android:id="@+id/pmfi_status_row"
                 android:layout_width="match_parent"
@@ -266,7 +379,6 @@
                     android:progress="0"
                     android:indeterminate="false" />
 
-                <!-- SINGLE total line with percentage -->
                 <TextView
                     android:id="@+id/pmfiCounter"
                     android:layout_width="match_parent"
@@ -276,7 +388,7 @@
                     android:layout_marginTop="2dp" />
             </LinearLayout>
 
-            <!-- PMFI Section Card (PER-SECTION progress) -->
+            <!-- ===== PMFI Section Card (PER-SECTION progress) ===== -->
             <LinearLayout
                 android:id="@+id/pmfi_section_card"
                 android:layout_width="match_parent"
@@ -285,7 +397,6 @@
                 android:paddingTop="8dp"
                 android:paddingBottom="8dp">
 
-                <!-- Only the sections count (removed 'Section: –') -->
                 <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
@@ -299,7 +410,6 @@
                         android:text="Sections: 0/0" />
                 </LinearLayout>
 
-                <!-- Human-readable meaning -->
                 <TextView
                     android:id="@+id/tvSectionInfo"
                     android:layout_width="match_parent"
@@ -309,7 +419,6 @@
                     android:alpha="0.8"
                     android:layout_marginTop="2dp" />
 
-                <!-- Per-section progress -->
                 <ProgressBar
                     android:id="@+id/pbSection"
                     style="?android:attr/progressBarStyleHorizontal"
@@ -322,11 +431,11 @@
                     android:id="@+id/tvSectionFrames"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="0/0 (0%) in this section"
+                    android:text="0/0 (0%) in this zip"
                     android:layout_marginTop="4dp" />
             </LinearLayout>
 
-            <!-- Optional: mini console for pmfi.log -->
+            <!-- ===== Optional: mini console for pmfi.log ===== -->
             <ScrollView
                 android:id="@+id/pmfiLogContainer"
                 android:layout_width="match_parent"
@@ -358,7 +467,9 @@
         </LinearLayout>
     </ScrollView>
 
-    <!-- Preview (bottom) -->
+    <!-- =========================
+         BOTTOM: PREVIEW (scroll)
+         ========================= -->
     <ScrollView
         android:id="@+id/preview_scrollview"
         android:layout_width="match_parent"
@@ -367,7 +478,8 @@
         android:fillViewport="true"
         android:paddingBottom="72dp"
         android:clipToPadding="false"
-        android:visibility="gone">
+        android:visibility="gone"
+        android:fadeScrollbars="false">
 
         <FrameLayout
             android:id="@+id/preview_container"
