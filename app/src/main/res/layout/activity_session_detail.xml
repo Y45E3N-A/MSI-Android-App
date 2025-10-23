@@ -1,9 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/detail_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:orientation="vertical"
-    android:background="#FFF">
+    android:background="#FFFFFF">
 
     <TextView
         android:id="@+id/sessionDetailTime"
@@ -13,7 +14,7 @@
         android:padding="12dp"
         android:textSize="16sp"
         android:textStyle="bold"
-        android:visibility="gone"/>
+        android:visibility="gone" />
 
     <TextView
         android:id="@+id/sessionDetailLocation"
@@ -21,12 +22,25 @@
         android:layout_height="wrap_content"
         android:text="Location"
         android:paddingBottom="8dp"
+        android:paddingStart="12dp"
+        android:paddingEnd="12dp"
         android:textSize="14sp"
-        android:visibility="gone"/>
+        android:visibility="gone" />
+
+    <!-- Empty state (shown when no images) -->
+    <TextView
+        android:id="@+id/empty_view"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="No images in this session"
+        android:textSize="14sp"
+        android:layout_gravity="center_horizontal"
+        android:padding="12dp"
+        android:visibility="gone" />
 
     <androidx.viewpager2.widget.ViewPager2
         android:id="@+id/viewPager"
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1"/>
+        android:layout_weight="1" />
 </LinearLayout>

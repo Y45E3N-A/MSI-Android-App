@@ -10,7 +10,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [Session::class, CalibrationProfile::class],
-    version = 8,
+    version = 9,
     exportSchema = true
 )
 @TypeConverters(Converters::class)
@@ -119,14 +119,12 @@ abstract class AppDatabase : RoomDatabase() {
          * v7 -> v8:
          * - De-dupe any duplicate non-null runIds (keep newest row per runId)
          * - Create UNIQUE index on sessions(runId)
-         *   (SQLite allows multiple NULLs in a unique index, so AMSI rows are unaffected.)
          */
         private val MIGRATION_7_8 = object : Migration(7, 8) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 if (!tableExists(db, "sessions")) return
 
-                // Remove duplicates first to avoid UNIQUE constraint failures.
-                // Keeps the row with the greatest id per runId.
+                // Remove duplicates to avoid UNIQUE constraint failures.
                 db.execSQL(
                     """
                     DELETE FROM sessions
@@ -139,10 +137,30 @@ abstract class AppDatabase : RoomDatabase() {
                     """.trimIndent()
                 )
 
-                // Now create the unique index (no-op if it already exists).
+                // Create the unique index (no-op if it already exists).
                 db.execSQL(
                     "CREATE UNIQUE INDEX IF NOT EXISTS index_sessions_runId ON sessions(runId)"
                 )
+            }
+        }
+
+        /**
+         * v8 -> v9:
+         * - Add environment columns: envTempC, envHumidity, envTsUtc
+         */
+        private val MIGRATION_8_9 = object : Migration(8, 9) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                if (tableExists(db, "sessions")) {
+                    if (!columnExists(db, "sessions", "envTempC")) {
+                        db.execSQL("ALTER TABLE sessions ADD COLUMN envTempC REAL")
+                    }
+                    if (!columnExists(db, "sessions", "envHumidity")) {
+                        db.execSQL("ALTER TABLE sessions ADD COLUMN envHumidity REAL")
+                    }
+                    if (!columnExists(db, "sessions", "envTsUtc")) {
+                        db.execSQL("ALTER TABLE sessions ADD COLUMN envTsUtc TEXT")
+                    }
+                }
             }
         }
 
@@ -157,7 +175,8 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_4_5,
                         MIGRATION_5_6,
                         MIGRATION_6_7,
-                        MIGRATION_7_8
+                        MIGRATION_7_8,
+                        MIGRATION_8_9
                     )
                     .fallbackToDestructiveMigrationOnDowngrade()
                     .build()

@@ -41,8 +41,8 @@ interface SessionDao {
 
     /**
      * Merge-by-runId semantics:
-     *  - If session.runId is NULL/blank (AMSI), always insert a fresh row.
-     *  - If runId is present (PMFI), update existing row with same runId; otherwise insert.
+     *  - If runId is NULL/blank -> insert a fresh row.
+     *  - If runId is present -> update existing row with same runId; otherwise insert.
      */
     @Transaction
     suspend fun upsert(session: Session): Long {
@@ -59,6 +59,19 @@ interface SessionDao {
             }
         }
     }
+
+    // ---- Environment updates (metadata JSON) ----
+    @Query("""
+        UPDATE sessions
+        SET envTempC = :tempC, envHumidity = :humidity, envTsUtc = :tsUtc
+        WHERE runId = :runId
+    """)
+    suspend fun updateEnvByRunId(
+        runId: String,
+        tempC: Double?,
+        humidity: Double?,
+        tsUtc: String?
+    ): Int
 
     /**
      * Bulk variant: applies the same merge semantics per item.

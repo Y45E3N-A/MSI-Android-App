@@ -1,5 +1,23 @@
 <?xml version="1.0" encoding="utf-8"?>
-<paths>
-    <files-path name="internal_files" path="." />
-    <cache-path name="internal_cache" path="." />
+<paths xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- Internal app files -->
+    <files-path
+        name="internal_files"
+        path="." />
+
+    <cache-path
+        name="internal_cache"
+        path="." />
+
+    <!-- App-scoped external storage -->
+    <external-files-path
+        name="external_files"
+        path="." />
+
+    <!-- Public root (only if you truly store under /storage/emulated/0/MSI_App) -->
+    <external-path
+        name="public_root"
+        path="MSI_App/" />
+
 </paths>

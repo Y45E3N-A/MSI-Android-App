@@ -7,7 +7,7 @@
     android:orientation="vertical">
 
     <!-- =========================
-         TOP BAR: Title + Env chips
+         TOP BAR: Title + Battery + Env chips
          ========================= -->
     <LinearLayout
         android:id="@+id/topBar"
@@ -29,6 +29,23 @@
             android:text="MFI Android App"
             android:textStyle="bold"
             android:textSize="22sp" />
+
+        <!-- Battery chip (live) -->
+        <com.google.android.material.chip.Chip
+            android:id="@+id/chipBattery"
+            style="@style/Widget.MaterialComponents.Chip.Choice"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="— %"
+            app:chipIcon="@drawable/ic_battery_unknown_24"
+            app:chipIconVisible="true"
+            app:chipMinHeight="32dp"
+            app:chipCornerRadius="16dp"
+            app:checkedIconVisible="false" />
+
+        <Space
+            android:layout_width="8dp"
+            android:layout_height="0dp" />
 
         <!-- Temperature chip (live) -->
         <com.google.android.material.chip.Chip

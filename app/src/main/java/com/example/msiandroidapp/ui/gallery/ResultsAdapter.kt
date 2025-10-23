@@ -255,7 +255,7 @@ class ResultsAdapter(
             title.text = displayNameProvider.titleFor(session)
 
             // ✅ Subtitle built from per-row timestamp (createdAt → fallback to legacy string)
-            subtitle.text = buildSessionSubtitle(session)
+            subtitle.text = displayNameProvider.subtitleFor(session)
 
             // --- badge style + color based on type ---
             when (session.type.uppercase()) {

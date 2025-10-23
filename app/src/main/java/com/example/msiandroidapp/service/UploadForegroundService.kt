@@ -16,13 +16,17 @@ class UploadForegroundService : Service() {
         super.onCreate()
         createNotificationChannel()
 
-        val storageDir = File(getExternalFilesDir(null), "MSI_Sessions").apply { mkdirs() }
-        uploadServer = UploadServer(PORT, storageDir, this)
-        uploadServer?.start(SOCKET_READ_TIMEOUT, false) // NanoHTTPD: start(timeoutMillis, daemon)
-        startForeground(101, buildNotification())
+        // Use app-scoped "Sessions" directory instead of public MSI_App
+        val baseDir = getExternalFilesDir(null)!!
+        val storageDir = File(baseDir, "Sessions").apply { mkdirs() }
 
-        Log.i("UploadForegroundService", "UploadServer listening on :$PORT")
+        uploadServer = UploadServer(PORT, storageDir, this)
+        uploadServer?.start(SOCKET_READ_TIMEOUT, false)
+
+        startForeground(101, buildNotification())
+        Log.i("UploadForegroundService", "UploadServer listening on :$PORT at ${storageDir.absolutePath}")
     }
+
 
     override fun onDestroy() {
         try { uploadServer?.shutdown() } catch (_: Exception) {}

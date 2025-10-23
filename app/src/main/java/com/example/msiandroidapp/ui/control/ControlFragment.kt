@@ -151,6 +151,7 @@ class ControlFragment : Fragment() {
         hookSocketCore()
         hookCalibrationSocket()
         hookEnvSocket()
+        hookBatterySocket()
         renderEnv(null, null, null)
         // Start from a safe idle visual state
         updateConnUi(null)
@@ -163,6 +164,7 @@ class ControlFragment : Fragment() {
             PiSocketManager.setBaseUrl(currentIp)
             PiSocketManager.connect(::onPreviewImage, ::onStateUpdate)
             PiSocketManager.emit("get_state", JSONObject())
+            pollBatteryOnce()
         }
 
         // ----- Reset to start page + clear UI on connection loss -----
@@ -462,6 +464,8 @@ class ControlFragment : Fragment() {
         // Connection strip
         binding.piConnectionStatus.text = "Status: Unknown"
         binding.piConnectionDot.setBackgroundResource(R.drawable.circle_grey)
+        binding.chipBattery.text = "— %"
+        binding.chipBattery.setChipIconResource(R.drawable.ic_battery_unknown_24)
 
         // Last button & switches
         binding.lastPiButtonText.text = "MFI Button Pressed: --"
@@ -746,6 +750,83 @@ class ControlFragment : Fragment() {
             delay(50)
         }
     }
+    // --- Battery telemetry (freshness tracking) ---
+    private var lastBatteryEventAt: Long = 0L
+    private val batteryPollMs = 10_000L
+
+    private fun hookBatterySocket() {
+        // payload is the snapshot (server emits it flat)
+        PiSocketManager.on("battery.update") { payload ->
+            val root = payload as org.json.JSONObject
+            lastBatteryEventAt = System.currentTimeMillis()
+            if (!isAdded) return@on
+            requireActivity().runOnUiThread {
+                renderBatteryFromJson(root)
+            }
+        }
+    }
+
+    private fun pollBatteryOnce() {
+        val ip = currentIp
+        if (ip.isBlank()) return
+        val req = Request.Builder().url("http://$ip:5000/battery").get().build()
+        quickClient.newCall(req).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: IOException) { /* ignore; socket is primary */ }
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                response.use {
+                    if (!it.isSuccessful) return
+                    val body = it.body?.string().orEmpty()
+                    try {
+                        val obj = org.json.JSONObject(body)
+                        val snap = obj.optJSONObject("battery") ?: return
+                        if (!isAdded) return
+                        requireActivity().runOnUiThread {
+                            renderBatteryFromJson(snap)
+                        }
+                    } catch (_: Exception) { /* ignore */ }
+                }
+            }
+        })
+    }
+
+    private fun renderBatteryFromJson(snap: org.json.JSONObject?) {
+        if (snap == null) {
+            binding.chipBattery.text = "— %"
+            binding.chipBattery.setChipIconResource(R.drawable.ic_battery_unknown_24)
+            return
+        }
+
+        val state   = snap.optString("charging_state", null)?.uppercase() ?: "UNKNOWN"
+        val present = if (snap.has("present")) snap.optBoolean("present") else null
+        val soc     = snap.optIntOrNull("soc_pct")
+        val volt    = snap.optDoubleOrNull("voltage_v")
+
+        // Choose icon
+        val iconRes = when (state) {
+            "CHARGING"     -> R.drawable.ic_battery_charging_24
+            "FAULT"        -> R.drawable.ic_battery_alert_24
+            "NO_BATTERY"   -> R.drawable.ic_battery_unknown_24
+            "NOT_CHARGING" -> if (present == false) R.drawable.ic_battery_unknown_24 else R.drawable.ic_battery_24
+            else           -> if (present == false) R.drawable.ic_battery_unknown_24 else R.drawable.ic_battery_24
+        }
+
+        // Label: prefer %; else show voltage
+        val label = when {
+            soc != null -> "$soc%"
+            volt != null -> String.format(Locale.UK, "%.2f V", volt)
+            else -> "— %"
+        }
+
+        binding.chipBattery.text = label
+        binding.chipBattery.setChipIconResource(iconRes)
+    }
+
+    // JSON helpers
+    private fun org.json.JSONObject.optDoubleOrNull(key: String): Double? =
+        if (has(key) && !isNull(key)) optDouble(key) else null
+
+    private fun org.json.JSONObject.optIntOrNull(key: String): Int? =
+        if (has(key) && !isNull(key)) optInt(key) else null
 
     // ===== Status polling / connection =====
     private fun setBaseUrls(ip: String) {
@@ -773,6 +854,9 @@ class ControlFragment : Fragment() {
                         val now = System.currentTimeMillis()
                         if (now - lastEnvEventAt > envPollMs) {
                             pollEnvOnce()
+                        }
+                        if (System.currentTimeMillis() - lastBatteryEventAt > batteryPollMs) {
+                            pollBatteryOnce()
                         }
 
                         // If nothing good for a while → schedule disconnect
@@ -925,25 +1009,63 @@ class ControlFragment : Fragment() {
         PiSocketManager.on("error") { scheduleDebouncedDisconnect() }
     }
     // ===== Environment (Temp / Humidity) socket + render =====
+    // In ControlFragment (or wherever hookEnvSocket() lives)
     private fun hookEnvSocket() {
-        // Socket event from Pi: "env.update" with { temp_c, humidity, ts_utc }
+        // Pi sends either a JSONObject, a JSON string, or a Map
         PiSocketManager.on("env.update") { payload ->
-            val j = payload as org.json.JSONObject
-            val t = j.optDouble("temp_c", Double.NaN)
-            val h = j.optDouble("humidity", Double.NaN)
-            val ts = j.optString("ts_utc", null)
+            try {
+                val obj: org.json.JSONObject? = when (payload) {
+                    is org.json.JSONObject -> payload
+                    is String -> runCatching { org.json.JSONObject(payload) }.getOrNull()
+                    is Map<*, *> -> org.json.JSONObject(payload)
+                    else -> null
+                }
 
-            latestTempC = if (t.isNaN()) null else t
-            latestHumidity = if (h.isNaN()) null else h
-            latestEnvIso = ts
-            lastEnvEventAt = System.currentTimeMillis()
+                if (obj == null) {
+                    Log.w("ControlFragment", "env.update: unexpected payload type: ${payload?.javaClass?.name}")
+                    return@on
+                }
 
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
-                renderEnv(latestTempC, latestHumidity, latestEnvIso)
+                // Support both: { env:{ temp_c, humidity, ts_utc } } and flat { temp_c, humidity, ts_utc }
+                val env = obj.optJSONObject("env") ?: obj
+
+                val tRaw = env.optDouble("temp_c", Double.NaN)
+                val hRaw = env.optDouble("humidity", Double.NaN)
+                val ts   = env.optString("ts_utc").takeIf { it.isNotBlank() }
+
+                latestTempC = if (tRaw.isNaN()) null else tRaw
+                latestHumidity = if (hRaw.isNaN()) null else hRaw
+                latestEnvIso = ts
+                lastEnvEventAt = System.currentTimeMillis()
+
+                // If a run/session id is included, persist immediately
+                val runId = sequenceOf("runId", "sessionId", "session_id")
+                    .mapNotNull { key -> obj.optString(key).takeIf { it.isNotBlank() } }
+                    .firstOrNull()
+
+                if (runId != null && (latestTempC != null || latestHumidity != null || latestEnvIso != null)) {
+                    viewLifecycleOwner.lifecycleScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+                        runCatching {
+                            val dao = com.example.msiandroidapp.data.AppDatabase.getDatabase(requireContext()).sessionDao()
+                            val rows = dao.updateEnvByRunId(runId, latestTempC, latestHumidity, latestEnvIso)
+                            Log.i("ControlFragment", "env.update saved for runId=$runId rows=$rows T=$latestTempC RH=$latestHumidity ts=$latestEnvIso")
+                        }.onFailure { e ->
+                            Log.w("ControlFragment", "env.update DB error: ${e.message}")
+                        }
+                    }
+                }
+
+                if (!isAdded) return@on
+                requireActivity().runOnUiThread {
+                    renderEnv(latestTempC, latestHumidity, latestEnvIso)
+                }
+            } catch (t: Throwable) {
+                Log.e("ControlFragment", "Handler for 'env.update' failed", t)
             }
         }
     }
+
+
 
     // Pretty-print on the Control tab
     private fun renderEnv(tempC: Double?, rh: Double?, iso: String?) {

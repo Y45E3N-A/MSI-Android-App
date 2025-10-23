@@ -51,6 +51,16 @@ class GalleryFragment : Fragment() {
     private val controlViewModel: ControlViewModel by activityViewModels()
 
     private val handler = Handler(Looper.getMainLooper())
+    private lateinit var toolbar: com.google.android.material.appbar.MaterialToolbar
+    private lateinit var emptyState: View
+    private lateinit var chipAll: com.google.android.material.chip.Chip
+    private lateinit var chipAmsi: com.google.android.material.chip.Chip
+    private lateinit var chipPmfi: com.google.android.material.chip.Chip
+    private lateinit var chipCalib: com.google.android.material.chip.Chip
+    private lateinit var btnSort: com.google.android.material.button.MaterialButton
+
+    // Sorting toggle: true = newest first, false = oldest first
+    private var newestFirst: Boolean = true
 
     // Selection state
     private val selectedIds = linkedSetOf<Long>()
@@ -98,7 +108,16 @@ class GalleryFragment : Fragment() {
     ): View {
         val root = inflater.inflate(R.layout.fragment_gallery, container, false)
 
+        toolbar = root.findViewById(R.id.gallery_toolbar)
         recyclerView = root.findViewById(R.id.gallery_recycler_view)
+        emptyState = root.findViewById(R.id.empty_state)
+
+        chipAll = root.findViewById(R.id.chip_all)
+        chipAmsi = root.findViewById(R.id.chip_amsi)
+        chipPmfi = root.findViewById(R.id.chip_pmfi)
+        chipCalib = root.findViewById(R.id.chip_calib)
+        btnSort = root.findViewById(R.id.btn_sort)
+
         recyclerView.layoutManager = LinearLayoutManager(requireContext())
 
         adapter = ResultsAdapter(
@@ -117,34 +136,106 @@ class GalleryFragment : Fragment() {
                 toggleSelection(idForCalibration(c))
             },
             displayNameProvider = object : DisplayNameProvider {
-                override fun titleFor(session: Session): String =
-                    this@GalleryFragment.displayNameFor(session)
-
-                override fun subtitleFor(session: Session): String =
-                    this@GalleryFragment.subtitleFor(session)
-
-                override fun titleFor(cal: CalibrationProfile): String =
-                    this@GalleryFragment.displayNameFor(cal)
+                override fun titleFor(session: Session): String = this@GalleryFragment.displayNameFor(session)
+                override fun subtitleFor(session: Session): String = this@GalleryFragment.subtitleFor(session)
+                override fun titleFor(cal: CalibrationProfile): String = this@GalleryFragment.displayNameFor(cal)
             }
         ).apply {
-            onSelectionChanged = { hasSelection, _ ->
+            onSelectionChanged = { hasSelection, count ->
                 backCallback.isEnabled = hasSelection
-                invalidateSelectionUI()
+                updateToolbarForSelection(count)
             }
         }
 
         recyclerView.adapter = adapter
+
+        // Header actions
+        toolbar.setOnMenuItemClickListener { item -> onTopMenuItem(item) }
+
+        chipAll.setOnClickListener { setFilter(ResultsFilter.ALL); updateChips() }
+        chipAmsi.setOnClickListener { setFilter(ResultsFilter.AMSI); updateChips() }
+        chipPmfi.setOnClickListener { setFilter(ResultsFilter.PMFI); updateChips() }
+        chipCalib.setOnClickListener { setFilter(ResultsFilter.CALIBRATIONS); updateChips() }
+        updateChips()
+
+        btnSort.setOnClickListener {
+            newestFirst = !newestFirst
+            btnSort.text = if (newestFirst) "Sort: Newest" else "Sort: Oldest"
+            val base = galleryViewModel.results.value ?: emptyList()
+            submitMerged(applyFilterAndSort(base), forceHideInProgress = true)
+        }
+        btnSort.text = if (newestFirst) "Sort: Newest" else "Sort: Oldest"
+
         return root
+    }
+    private fun applyFilterAndSort(list: List<ResultListItem>): List<ResultListItem> {
+        val filtered = when (currentFilter) {
+            ResultsFilter.ALL -> list.filter { it !is ResultListItem.InProgress }
+            ResultsFilter.AMSI -> list.filter {
+                when (it) {
+                    is ResultListItem.SessionItem     -> it.session.isAMSI()
+                    is ResultListItem.CalibrationItem -> false
+                    is ResultListItem.InProgress      -> false
+                }
+            }
+            ResultsFilter.PMFI -> list.filter {
+                when (it) {
+                    is ResultListItem.SessionItem     -> it.session.isPMFI()
+                    is ResultListItem.CalibrationItem -> false
+                    is ResultListItem.InProgress      -> false
+                }
+            }
+            ResultsFilter.CALIBRATIONS -> list.filter { it is ResultListItem.CalibrationItem }
+        }
+
+        // Stable, explicit sort:
+        // - Sessions by timestamp (computed) desc/asc
+        // - Calibrations by createdAt desc/asc
+        val (sessions, others) = filtered.partition { it is ResultListItem.SessionItem }
+        val sortedSessions = sessions
+            .map { it as ResultListItem.SessionItem }
+            .sortedWith(compareBy { sortTimestampForSession(it.session) })
+            .let { if (newestFirst) it.reversed() else it }
+
+        val sortedCalibs = others
+            .mapNotNull { it as? ResultListItem.CalibrationItem }
+            .sortedWith(compareBy { it.profile.createdAt })
+            .let { if (newestFirst) it.reversed() else it }
+
+        return (sortedSessions + sortedCalibs)
+    }
+
+    private fun onTopMenuItem(item: MenuItem): Boolean = when (item.itemId) {
+        R.id.action_select_all       -> { selectAllVisible(); true }
+        R.id.action_share_selected   -> { shareSelected(); true }
+        R.id.action_delete_selected  -> { deleteSelected(); true }
+        R.id.action_rename_inline    -> { promptRenameSelected(); true }
+        else -> false
+    }
+
+    private fun updateToolbarForSelection(selectedCount: Int) {
+        inSelectionMode = selectedCount > 0
+        val menu = toolbar.menu
+
+        // Title reflects mode
+        toolbar.title = if (inSelectionMode) "$selectedCount selected" else "MFI Android App"
+
+        // Visibility of actions in header menu
+        menu.findItem(R.id.action_share_selected)?.isVisible = inSelectionMode
+        menu.findItem(R.id.action_delete_selected)?.isVisible = inSelectionMode
+        menu.findItem(R.id.action_select_all)?.isVisible = !inSelectionMode || selectedCount < adapter.currentList.count {
+            it !is ResultListItem.InProgress
+        }
+        menu.findItem(R.id.action_rename_inline)?.isVisible = inSelectionMode && selectedIds.size == 1
     }
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         galleryViewModel.results.observe(viewLifecycleOwner) { list ->
-            val filteredSorted = applyFilterOnly(list)
+            val filteredSorted = applyFilterAndSort(list)
             submitMerged(filteredSorted)
             reconcileSelectionWith(adapter.currentList)
         }
 
-        // Rebuild in-progress row when capture state changes
         listOf(
             controlViewModel.isCapturing,
             controlViewModel.capturedBitmaps,
@@ -152,10 +243,11 @@ class GalleryFragment : Fragment() {
         ).forEach { live ->
             live.observe(viewLifecycleOwner) {
                 val base = galleryViewModel.results.value ?: emptyList()
-                submitMerged(applyFilterOnly(base))
+                submitMerged(applyFilterAndSort(base))
             }
         }
     }
+
 
     // ---------- Toolbar ----------
     override fun onCreateOptionsMenu(menu: Menu, inflater: MenuInflater) {
@@ -221,9 +313,10 @@ class GalleryFragment : Fragment() {
         if (currentFilter == f) return
         currentFilter = f
         val base = galleryViewModel.results.value ?: emptyList()
-        submitMerged(applyFilterOnly(base), forceHideInProgress = true)
+        submitMerged(applyFilterAndSort(base), forceHideInProgress = true)
         clearSelectionAndExitMode()
     }
+
 
     private fun invalidateSelectionUI() {
         requireActivity().invalidateOptionsMenu()
@@ -277,9 +370,8 @@ class GalleryFragment : Fragment() {
     private var filterCalibsItem: MenuItem? = null
 
     private fun enterSelectionMode() {
-        inSelectionMode = true
-        adapter.setSelectionMode(true)
-        invalidateSelectionUI()
+        // caller updates selectedIds first; we just refresh toolbar state
+        updateToolbarForSelection(selectedIds.size)
         backCallback.isEnabled = true
     }
 
@@ -287,9 +379,10 @@ class GalleryFragment : Fragment() {
         inSelectionMode = false
         selectedIds.clear()
         adapter.clearSelection()
-        invalidateSelectionUI()
+        updateToolbarForSelection(0)
         backCallback.isEnabled = false
     }
+
 
     private fun toggleSelection(id: Long) {
         if (selectedIds.contains(id)) selectedIds.remove(id) else selectedIds.add(id)
@@ -353,22 +446,41 @@ class GalleryFragment : Fragment() {
         } else null
     }
 
-    private fun submitMerged(list: List<ResultListItem>, forceHideInProgress: Boolean = false) {
+    private fun submitMerged(base: List<ResultListItem>, forceHideInProgress: Boolean = false) {
         if (forceHideInProgress) hideInProgressOnce = true
 
         val merged = mutableListOf<ResultListItem>()
         val inProg = if (!hideInProgressOnce) buildInProgressItemOrNull() else null
-        if (inProg != null) merged.add(inProg)
-        merged.addAll(list)
+        if (inProg != null && currentFilter != ResultsFilter.CALIBRATIONS) {
+            merged.add(inProg)
+        }
+        merged.addAll(base)
 
-        adapter.submitList(merged)
-        reconcileSelectionWith(merged)
+        adapter.submitList(merged) {
+            // Called after diff completes
+            showEmptyState(merged.isEmpty() || merged.all { it is ResultListItem.InProgress })
+            reconcileSelectionWith(merged)
+            updateToolbarForSelection(selectedIds.size)
+        }
+    }
+    private fun updateChips() {
+        chipAll.isChecked  = currentFilter == ResultsFilter.ALL
+        chipAmsi.isChecked = currentFilter == ResultsFilter.AMSI
+        chipPmfi.isChecked = currentFilter == ResultsFilter.PMFI
+        chipCalib.isChecked= currentFilter == ResultsFilter.CALIBRATIONS
     }
 
-    // ---------- Open ----------
+    private fun showEmptyState(show: Boolean) {
+        emptyState.visibility = if (show) View.VISIBLE else View.GONE
+        recyclerView.visibility = if (show) View.INVISIBLE else View.VISIBLE
+    }
+
+
+
     private fun openSession(session: Session) {
         startActivity(SessionDetailActivity.newIntent(requireContext(), session.id))
     }
+
 
     private fun openCalibration(profile: CalibrationProfile) {
         val wlToNorm = extractCalibrationMap(profile)
@@ -703,8 +815,17 @@ class GalleryFragment : Fragment() {
         val loc = (session.location).trim().ifEmpty { "UnknownLoc" }
         val custom = prefs.getString(spKeySession(session.id), "")?.trim().orEmpty()
         val title = if (custom.isNotEmpty()) sanitizeName(custom) else sanitizeName(defaultSessionTitle(session))
-        return "${title}___Date_${d}___Time_${t}___Location_${sanitizeName(loc)}"
+
+        val envSlug = run {
+            val temp = session.envTempC?.let { String.format(Locale.US, "%.1f", it) } ?: "NA"
+            val rh   = session.envHumidity?.let { String.format(Locale.US, "%.0f", it) } ?: "NA"
+            // Keep it short and filename-safe
+            "___Env_T_${temp}C___RH_${rh}pc"
+        }
+
+        return "${title}___Date_${d}___Time_${t}___Location_${sanitizeName(loc)}$envSlug"
     }
+
 
     private fun buildSessionsZip(sessions: List<Session>): File? = runCatching {
         val cacheDir = File(requireContext().cacheDir, "shares").apply { mkdirs() }
@@ -800,34 +921,38 @@ class GalleryFragment : Fragment() {
         if (session == null) return "Session ${System.currentTimeMillis()}"
         val custom = prefs.getString(spKeySession(session.id), "")?.trim().orEmpty()
         val base   = if (custom.isNotEmpty()) custom else "Session ${session.id}"
-        return "${kindPrefixFor(session)} $base"
+        return base
     }
 
     private fun displayNameFor(profile: CalibrationProfile): String {
         val local = prefs.getString(spKeyCalib(profile.id), "")?.trim().orEmpty()
-        val base  = when {
-            local.isNotEmpty() -> local
-            profile.name.isNotBlank() -> profile.name
-            else -> "Calibration ${profile.id}"
+        return when {
+            local.isNotEmpty()          -> local
+            profile.name.isNotBlank()   -> profile.name
+            else                        -> "Calibration ${profile.id}"
         }
-        return "${kindPrefixFor(profile)} $base"
     }
 
     private fun subtitleFor(session: Session): String {
-        val latLon = (session.location).trim().ifEmpty { "Unknown" }
+        val tz = java.util.TimeZone.getTimeZone("Europe/London")
         val dt = parseSessionDate(session.timestamp)
-        val ts = SimpleDateFormat("| dd-MM-yyyy | HH:mm:ss", Locale.getDefault()).format(dt)
 
-        val pmfiBits = if (session.type.equals("PMFI", true)) {
-            val ini = session.iniName?.let { "INI: $it" } ?: ""
-            val sec = session.label?.let { "Section: $it" } ?: ""
-            val idx = session.sectionIndex?.let { "#$it" } ?: ""
-            listOf(ini, sec, idx).filter { it.isNotBlank() }.joinToString(" • ")
-        } else null
+        val timeFmt = java.text.SimpleDateFormat("HH:mm:ss", Locale.getDefault()).apply { timeZone = tz }
+        val dateFmt = java.text.SimpleDateFormat("dd-MM-yyyy", Locale.getDefault()).apply { timeZone = tz }
 
-        val right = listOfNotNull(pmfiBits, latLon.takeIf { it != "Unknown" } ).joinToString(" • ").ifBlank { latLon }
-        return if (right.isNotBlank()) "$right $ts" else ts
+        val timeStr = timeFmt.format(dt)                          // e.g., "14:07:12"
+        val dateStr = dateFmt.format(dt)                          // e.g., "23-10-2025"
+        val locStr  = session.location.trim().ifEmpty { "Unknown" }
+
+        val tempStr = session.envTempC?.let { "T ${String.format(Locale.US, "%.1f", it)}°C" }
+        val rhStr   = session.envHumidity?.let { "RH ${String.format(Locale.US, "%.0f", it)}%" }
+
+        return listOfNotNull(timeStr, dateStr, locStr, tempStr, rhStr)
+            .filter { it.isNotBlank() }
+            .joinToString(" | ")
     }
+
+
 
 
     private fun defaultSessionTitle(session: Session): String = "Session ${session.id}"
