@@ -1252,27 +1252,53 @@ class ControlFragment : Fragment() {
     }
 
     private fun startPmfi(iniText: String) {
+        // We generate a stable-ish session_id so uploads can tag the run.
         val sessionId = UUID.randomUUID().toString()
-        val b64 = Base64.encodeToString(iniText.toByteArray(Charsets.UTF_8), Base64.NO_WRAP)
+
+        // IMPORTANT:
+        // We are NOW sending ini_text (raw multiline INI) as JSON.
+        // We are NOT sending ini_b64 anymore because the Pi parser may choke on it
+        // for long/complex INIs and respond "ini_b64 decode failed".
+        //
+        // This matches the Pi route logic:
+        //   if ini_text: parse directly
+        //   elif ini_b64: base64-decode & parse
+        //
+        // Sending ini_text avoids the decode path entirely.
+        val body = PmfiStartBody(
+            ini_text = iniText,
+            session_id = sessionId,
+            upload_mode = "zip" // Pi ignores this right now but it's fine to include
+        )
+
         viewLifecycleOwner.lifecycleScope.launch {
             try {
-                val resp = PiApi.api.pmfiStart(PmfiStartBody(ini_b64 = b64, session_id = sessionId, upload_mode = "zip"))
+                val resp = PiApi.api.pmfiStart(body)
+
                 if (resp.isSuccessful) {
+                    // We assume success structure like:
+                    // { "ok": true, "session_id": "...", "config_id": "...", "plan": {...} }
                     isPmfiRunning = true
                     setUiBusy(true)
+
                     binding.pmfiStartBtn.text = "PMFI running…"
                     binding.pmfiStageLabel.text = "PMFI started… (sessionId=$sessionId)"
-                    resetPmfiUi(hide = false)   // show clean bars immediately
+
+                    // Reset/enable PMFI progress UI immediately so the bars are visible
+                    resetPmfiUi(hide = false)
                     showPmfiUi()
 
                 } else {
-                    toast("PMFI start failed: ${resp.code()} ${resp.errorBody()?.string().orEmpty()}")
+                    // Show server's error string if present (super helpful during dev)
+                    val errBody = resp.errorBody()?.string().orEmpty()
+                    toast("PMFI start failed: ${resp.code()} $errBody")
                 }
             } catch (e: Exception) {
                 toast("Network error: ${e.localizedMessage}")
             }
         }
     }
+
 
 
     private fun sendShutdown() {

@@ -22,9 +22,11 @@ data class PmfiStartResponse(
     val ok: Boolean? = null,
     val session_id: String? = null,
     val config_id: String? = null,
-    val status: String? = null,   // e.g. "busy"
-    val error: String? = null
+    val status: String? = null,
+    val error: String? = null,
+    val plan: Map<String, Any?>? = null
 )
+
 
 // Optional: /pmfi/status (shape may vary; keep fields nullable)
 data class PmfiStatusResponse(
@@ -60,13 +62,9 @@ data class IniGetResponse(
 
 // Body for /pmfi/start (server accepts any of these; at least one config must be provided)
 data class PmfiStartBody(
-    val ini_text: String? = null,     // raw INI text
-    val ini_b64: String? = null,      // base64 of INI text
-    val ini_name: String? = null,     // filename of an INI previously uploaded to /ini/upload
-    val config_id: String? = null,    // sha1 returned by /pmfi/upload or from prior load
-    val session_id: String? = null,   // optional; server can make one if omitted
-    val upload_mode: String? = "zip", // "zip" (default) or "png"
-    val gateway_ip: String? = null    // optional override; server usually learns phone IP automatically
+    val ini_text: String,
+    val session_id: String,
+    val upload_mode: String = "zip"
 )
 
 // ------------------------------
