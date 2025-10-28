@@ -10,7 +10,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [Session::class, CalibrationProfile::class],
-    version = 9,
+    version = 10,
     exportSchema = true
 )
 @TypeConverters(Converters::class)
@@ -124,22 +124,21 @@ abstract class AppDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 if (!tableExists(db, "sessions")) return
 
-                // Remove duplicates to avoid UNIQUE constraint failures.
+                // 1. Drop legacy unique index on runId if it exists.
+                // SQLite doesn't have "DROP INDEX IF EXISTS" in older APIs via SupportSQLiteDatabase,
+                // but execSQL will just throw if it doesn't exist, so wrap in runCatching.
+                runCatching {
+                    db.execSQL("DROP INDEX IF EXISTS index_sessions_runId")
+                }
+
+                // 2. Create the new composite unique index.
+                // Note: sectionIndex can be NULL for AMSI rows. SQLite allows multiple NULLs in a UNIQUE index,
+                // so AMSI rows won't collide with each other even though runId=sessionId there.
                 db.execSQL(
                     """
-                    DELETE FROM sessions
-                    WHERE runId IS NOT NULL
-                      AND id NOT IN (
-                          SELECT MAX(id) FROM sessions
-                          WHERE runId IS NOT NULL
-                          GROUP BY runId
-                      )
-                    """.trimIndent()
-                )
-
-                // Create the unique index (no-op if it already exists).
-                db.execSQL(
-                    "CREATE UNIQUE INDEX IF NOT EXISTS index_sessions_runId ON sessions(runId)"
+            CREATE UNIQUE INDEX IF NOT EXISTS index_sessions_runId_sectionIndex
+            ON sessions(runId, sectionIndex)
+            """.trimIndent()
                 )
             }
         }
@@ -163,6 +162,28 @@ abstract class AppDatabase : RoomDatabase() {
                 }
             }
         }
+        private val MIGRATION_9_10 = object : Migration(9, 10) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                if (!tableExists(db, "sessions")) return
+
+                // 1. Drop legacy unique index on runId alone.
+                // Some devices (older schema) might still have index_sessions_runId.
+                // "DROP INDEX IF EXISTS" is valid SQL, but SupportSQLiteDatabase.execSQL
+                // may still throw on some OEM sqlite builds, so we runCatching it.
+                runCatching {
+                    db.execSQL("DROP INDEX IF EXISTS index_sessions_runId")
+                }
+
+                // 2. Create composite unique index (runId, sectionIndex)
+                // Safeguarded with IF NOT EXISTS in case we already created it in an earlier hotfix.
+                db.execSQL(
+                    """
+            CREATE UNIQUE INDEX IF NOT EXISTS index_sessions_runId_sectionIndex
+            ON sessions(runId, sectionIndex)
+            """.trimIndent()
+                )
+            }
+        }
 
         fun getDatabase(context: Context): AppDatabase =
             INSTANCE ?: synchronized(this) {
@@ -176,7 +197,8 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_5_6,
                         MIGRATION_6_7,
                         MIGRATION_7_8,
-                        MIGRATION_8_9
+                        MIGRATION_8_9,
+                        MIGRATION_9_10
                     )
                     .fallbackToDestructiveMigrationOnDowngrade()
                     .build()

@@ -171,16 +171,16 @@ class GalleryFragment : Fragment() {
     private fun applyFilterAndSort(list: List<ResultListItem>): List<ResultListItem> {
         val filtered = when (currentFilter) {
             ResultsFilter.ALL -> list.filter { it !is ResultListItem.InProgress }
-            ResultsFilter.AMSI -> list.filter {
-                when (it) {
-                    is ResultListItem.SessionItem     -> it.session.isAMSI()
+            ResultsFilter.AMSI -> list.filter { item ->
+                when (item) {
+                    is ResultListItem.SessionItem     -> item.session.isAMSI()
                     is ResultListItem.CalibrationItem -> false
                     is ResultListItem.InProgress      -> false
                 }
             }
-            ResultsFilter.PMFI -> list.filter {
-                when (it) {
-                    is ResultListItem.SessionItem     -> it.session.isPMFI()
+            ResultsFilter.PMFI -> list.filter { item ->
+                when (item) {
+                    is ResultListItem.SessionItem     -> item.session.isPMFI()
                     is ResultListItem.CalibrationItem -> false
                     is ResultListItem.InProgress      -> false
                 }
@@ -188,22 +188,19 @@ class GalleryFragment : Fragment() {
             ResultsFilter.CALIBRATIONS -> list.filter { it is ResultListItem.CalibrationItem }
         }
 
-        // Stable, explicit sort:
-        // - Sessions by timestamp (computed) desc/asc
-        // - Calibrations by createdAt desc/asc
-        val (sessions, others) = filtered.partition { it is ResultListItem.SessionItem }
-        val sortedSessions = sessions
-            .map { it as ResultListItem.SessionItem }
-            .sortedWith(compareBy { sortTimestampForSession(it.session) })
-            .let { if (newestFirst) it.reversed() else it }
+        // deterministically sort by (timestampKey, stableId)
+        val asc = filtered.sortedWith(
+            compareBy<ResultListItem>(
+                { sortKeyForItem(it) },
+                { stableIdForItem(it) },
+            )
+        )
 
-        val sortedCalibs = others
-            .mapNotNull { it as? ResultListItem.CalibrationItem }
-            .sortedWith(compareBy { it.profile.createdAt })
-            .let { if (newestFirst) it.reversed() else it }
-
-        return (sortedSessions + sortedCalibs)
+        // newestFirst means descending timestamp
+        return if (newestFirst) asc.reversed() else asc
     }
+
+
 
     private fun onTopMenuItem(item: MenuItem): Boolean = when (item.itemId) {
         R.id.action_select_all       -> { selectAllVisible(); true }
@@ -322,30 +319,6 @@ class GalleryFragment : Fragment() {
         requireActivity().invalidateOptionsMenu()
     }
 
-    // ---------- Filtering + newest-first sorting ----------
-    // ---------- Filtering + newest-first sorting ----------
-    private fun applyFilterOnly(list: List<ResultListItem>): List<ResultListItem> =
-        when (currentFilter) {
-            ResultsFilter.ALL -> list.filter { it !is ResultListItem.InProgress }
-
-            ResultsFilter.AMSI -> list.filter { item ->
-                when (item) {
-                    is ResultListItem.SessionItem     -> item.session.isAMSI()
-                    is ResultListItem.CalibrationItem -> false
-                    is ResultListItem.InProgress      -> false
-                }
-            }
-
-            ResultsFilter.PMFI -> list.filter { item ->
-                when (item) {
-                    is ResultListItem.SessionItem     -> item.session.isPMFI()
-                    is ResultListItem.CalibrationItem -> false
-                    is ResultListItem.InProgress      -> false
-                }
-            }
-
-            ResultsFilter.CALIBRATIONS -> list.filter { it is ResultListItem.CalibrationItem }
-        }
 
     private fun Session.isAMSI(): Boolean = type.equals("AMSI", ignoreCase = true)
     private fun Session.isPMFI(): Boolean = type.equals("PMFI", ignoreCase = true)
@@ -355,6 +328,21 @@ class GalleryFragment : Fragment() {
         if (parsed != null) return parsed
         val newest = session.imagePaths.maxOfOrNull { path -> File(path).lastModified() }
         return newest ?: 0L
+    }
+
+    private fun sortKeyForItem(item: ResultListItem): Long {
+        return when (item) {
+            is ResultListItem.SessionItem -> sortTimestampForSession(item.session)
+            is ResultListItem.CalibrationItem -> item.profile.createdAt
+            is ResultListItem.InProgress -> Long.MAX_VALUE // always "newest"
+        }
+    }
+    private fun stableIdForItem(item: ResultListItem): Long {
+        return when (item) {
+            is ResultListItem.SessionItem -> item.session.id
+            is ResultListItem.CalibrationItem -> 1_000_000_000_000L + item.profile.id
+            is ResultListItem.InProgress -> Long.MAX_VALUE - 1 // just something huge
+        }
     }
 
     // ---------- Selection ----------
@@ -440,7 +428,7 @@ class GalleryFragment : Fragment() {
         } else if (imageCount == 16 && bitmaps.any { it != null }) {
             handler.postDelayed({
                 val base = galleryViewModel.results.value ?: emptyList()
-                submitMerged(applyFilterOnly(base), forceHideInProgress = true)
+                submitMerged(applyFilterAndSort(base), forceHideInProgress = true)
             }, 1500)
             ResultListItem.InProgress(bitmaps, imageCount)
         } else null

@@ -35,9 +35,10 @@ import java.util.zip.ZipFile
  *
  * Modes:
  *  - AMSI (default): expects 16 PNGs per sessionId. Auto-finalises at 16.
- *  - PMFI ZIP (preferred): a ZIP per section (with &mode=pmfi). We detect ZIP by file signature,
- *    Content-Type, or filename extension. We unzip PNGs and finalise a *run* merge/update when complete.
- *  - PMFI PNG stream (optional): accept + count; no auto-finalise unless enabled below.
+ *  - PMFI ZIP (preferred): a ZIP for a single section/wavelength block (&mode=pmfi).
+ *    We unzip the PNGs, merge them into that section’s row in Room
+ *    (1 DB row per (runId, sectionIndex)), and broadcast progress.
+ *  - PMFI PNG stream (optional/legacy): can still dribble frames, but ZIP is the main path.
  */
 class UploadServer(
     port: Int,
@@ -61,6 +62,8 @@ class UploadServer(
         Log.i(TAG, "Sessions root: ${root.absolutePath}")
         root
     }
+    // prevent duplicate finalise/insert (AMSI safety)
+    private val finalisedKeys = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     private data class RunTracker(
         val runId: String,
@@ -85,11 +88,6 @@ class UploadServer(
         byteArrayOf(0x50, 0x4B, 0x05, 0x06),
         byteArrayOf(0x50, 0x4B, 0x07, 0x08)
     )
-
-    // Optional: if you ever stream PMFI PNGs, auto-finalise after idle period (disabled by default)
-    private val AUTO_FINALISE_PMFI_STREAM = false
-    private val PMFI_STREAM_IDLE_FINALISE_MS = 20_000L
-
     // --------------------------------------------------------------------------------------------
     // State / trackers
     // --------------------------------------------------------------------------------------------
@@ -103,7 +101,7 @@ class UploadServer(
     private val lastSeenAt = ConcurrentHashMap<String, Long>()
 
     // prevent duplicate finalise/insert
-    private val finalisedKeys = java.util.Collections.synchronizedSet(mutableSetOf<String>())
+
 
     // prevent duplicate DB inserts (per logical key)
     private val dbInserted = java.util.Collections.synchronizedSet(mutableSetOf<String>())
@@ -157,74 +155,6 @@ class UploadServer(
         }
     }
 
-    @Synchronized
-    private fun finalizeRunMergeOrInsert(runId: String, run: RunTracker, reason: String) {
-        // Build ordered PNG list
-        val allPngs = run.sectionPngs.entries
-            .sortedBy { it.key }
-            .flatMap { e -> e.value.sorted() }
-
-        if (allPngs.isEmpty()) {
-            Log.w(TAG, "Finalize skipped for $runId (no PNGs).")
-            return
-        }
-
-        val completedAt = System.currentTimeMillis()
-        val tsStr = SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.getDefault()).format(Date(completedAt))
-        Log.i(TAG, "Finalising PMFI run '$runId' (${allPngs.size} frames, reason=$reason)")
-
-        scope.launch {
-            try {
-                val dao = AppDatabase.getDatabase(context).sessionDao()
-                val existing = dao.findByRunId(runId)
-
-                if (existing == null) {
-                    // Insert new
-                    dao.upsert(
-                        Session(
-                            createdAt = completedAt,
-                            completedAtMillis = completedAt,
-                            timestamp = tsStr,
-                            location = "Unknown",  // simple default; AMSI path uses fused location
-                            imagePaths = allPngs,
-                            type = "PMFI",
-                            label = "PMFI Run",
-                            runId = runId,
-                            iniName = run.iniName,
-                            sectionIndex = null
-                        )
-                    )
-                } else {
-                    // Merge/append new images (ensure uniqueness + order)
-                    val merged = (existing.imagePaths.orEmpty() + allPngs).distinct().sorted()
-                    val updated = existing.copy(
-                        completedAtMillis = completedAt,
-                        timestamp = tsStr,
-                        imagePaths = merged,
-                        iniName = run.iniName.ifBlank { existing.iniName }
-                    )
-                    dao.update(updated)
-                }
-
-                // Apply any pending env now
-                pendingEnv.remove(runId)?.let { (t, h, ts) ->
-                    runCatching { dao.updateEnvByRunId(runId, t, h, ts) }
-                        .onSuccess { rows ->
-                            Log.i(TAG, "Applied pending env to PMFI runId=$runId (rows=$rows, T=$t, RH=$h, ts=$ts)")
-                        }
-                        .onFailure { e ->
-                            Log.w(TAG, "Failed to apply pending env for PMFI runId=$runId: ${e.message}")
-                        }
-                }
-
-                UploadProgressBus.uploadProgress.postValue(runId to allPngs.size)
-            } catch (e: Exception) {
-                Log.e(TAG, "DB merge/insert error for run=$runId: ${e.message}", e)
-            } finally {
-                pmfiRuns.remove(runId) // clear staging
-            }
-        }
-    }
 
     // --------------------------------------------------------------------------------------------
     // POST /upload
@@ -295,6 +225,7 @@ class UploadServer(
                 )
             }
 
+
             // ── 3) PMFI PNG stream (optional) ─────────────────────────────────────────────────────
             if (mode == "pmfi") {
                 val uploadsRoot = File(context.filesDir, "uploads").apply { mkdirs() }
@@ -322,10 +253,6 @@ class UploadServer(
                     )
                 )
 
-                if (AUTO_FINALISE_PMFI_STREAM) {
-                    schedulePmfiStreamIdleCheck(effectiveRunId)
-                }
-
                 cleanupStaleSessions()
                 return ok("OK: saved ${destFile.name}")
             }
@@ -349,6 +276,55 @@ class UploadServer(
             newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "error: ${e.message}")
         }
     }
+
+    // --------------------------------------------------------------------------------------------
+// PMFI section upsert helper
+// Takes everything we currently know for ONE (runId, sectionIndex) and writes/merges
+// it into the DB via SessionDao.upsertPmfiSection(...).
+// This is what actually makes "one card per wavelength section" show up in Gallery.
+// --------------------------------------------------------------------------------------------
+    private fun upsertPmfiSectionRow(
+        runId: String,
+        sectionIndex: Int,
+        iniName: String,
+        sectionLabel: String,
+        allPngsForSection: List<String>
+    ) {
+        val completedAt = System.currentTimeMillis()
+        val tsStr = SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.getDefault())
+            .format(Date(completedAt))
+
+        val (t, h, tsUtc) = pendingEnv[runId] ?: Triple(null, null, null)
+
+        // instead of hardcoded "Unknown", resolve location first
+        getBestEffortLocationString { locString ->
+
+            scope.launch {
+                try {
+                    val dao = AppDatabase.getDatabase(context).sessionDao()
+
+                    dao.upsertPmfiSection(
+                        runId = runId,
+                        sectionIndex = sectionIndex,
+                        iniName = iniName,
+                        newImagePaths = allPngsForSection,
+                        completedAtMillis = completedAt,
+                        timestampStr = tsStr,
+                        locationStr = locString,          // <-- now real location / lat,lon
+                        envTempC = t,
+                        envHumidity = h,
+                        envTsUtc = tsUtc,
+                        label = sectionLabel
+                    )
+
+                    // keep pendingEnv for future sections of same runId
+                } catch (e: Exception) {
+                    Log.e(TAG, "upsertPmfiSectionRow failed for runId=$runId sec=$sectionIndex", e)
+                }
+            }
+        }
+    }
+
 
 
     private fun handleEnvMetadataJson(hintedRunId: String?, tmpFile: File): Response {
@@ -387,42 +363,73 @@ class UploadServer(
         }
     }
 
-    // --------------------------------------------------------------------------------------------
-    // PMFI ZIP handler
-    // --------------------------------------------------------------------------------------------
+// PMFI ZIP handler
+//
+// Pi sends us (mode=pmfi) + a ZIP chunk. That ZIP = frames for ONE sectionIndex,
+// possibly just part of that section (e.g. part=002).
+//
+// After we unzip the frames, we:
+//   1. Track them in pmfiRuns[runId].sectionPngs[sectionIndex] (so we remember everything so far).
+//   2. Call upsertPmfiSectionRow(...) so Room has/updates a row for this specific section.
+//      -> That row shows up as its own card in Gallery.
+//   3. Post progress via UploadProgressBus.
+//
+// We do NOT create a single "whole PMFI run" row anymore.
+// --------------------------------------------------------------------------------------------
     private fun handlePmfiZip(
         sessionId: String,
         zipFilename: String,
         tmpFile: File,
         sectionParam: String?
     ): Response {
+
         val q = lastRequestParams.get() ?: emptyMap()
 
+        // The Pi's logical run identifier. May repeat across sections.
         val rawRunId     = q["runId"] ?: q["x-run-id"] ?: sessionId
+
+        // Name of the INI file or recipe used on Pi
         val iniNameParam = q["ini"] ?: q["iniName"] ?: q["x-ini"]
+        val iniName = iniNameParam?.let { File(it).name } ?: "unknown_ini"
+
+        // Which "wavelength block" / LED set is this ZIP for?
         val sectionIndex = q["sectionIndex"]?.toIntOrNull() ?: 0
-        val partParam    = q["part"] ?: ""                    // optional
-        val finalFlag    = (q["final"] == "1")                // explicit finalise
+
+        // Pi may split a section into multiple parts (part=001, 002, ...).
+        // We don't really *need* part for DB keys now, but it's nice info for logs.
+        val partParam    = q["part"] ?: ""
+
+        // Optional hint from Pi telling us how many frames we expect in this section total.
         val sectionTotalFrames = q["sectionTotalFrames"]?.toIntOrNull()
             ?: q["sectionFrames"]?.toIntOrNull()
             ?: q["framesPerSection"]?.toIntOrNull()
 
-        val iniName = iniNameParam?.let { File(it).name } ?: "unknown_ini"
+        // --- handle runId collisions across days/runs ---
+        //
+        // If the Pi accidentally reuses a runId that we already stored historically,
+        // and this *looks* like the start of a "new" scan (sectionIndex=0, first part),
+        // we mint a new effectiveRunId with a timestamp suffix, so we don't merge old data.
+        //
+        val looksLikeRunStart = (sectionIndex == 0) &&
+                (partParam.isBlank() || partParam == "001" || partParam == "1")
 
-        // Avoid merging a brand-new run into an old DB row with same runId
         val dao = AppDatabase.getDatabase(context).sessionDao()
-        val looksLikeRunStart = (sectionIndex == 0) && (partParam.isBlank() || partParam == "001" || partParam == "1")
-
-        val runIdInUse = try { blockingIo { dao.findByRunId(rawRunId) } != null } catch (_: Exception) { false }
+        val runIdInUse = try {
+            blockingIo { dao.findByRunId(rawRunId) } != null
+        } catch (_: Exception) {
+            false
+        }
 
         val effectiveRunId = if (looksLikeRunStart && runIdInUse && !pmfiRuns.containsKey(rawRunId)) {
             val stamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
             val newId = "${rawRunId}__$stamp"
             Log.w(TAG, "runId '$rawRunId' already used; starting a NEW run as '$newId'")
             newId
-        } else rawRunId
+        } else {
+            rawRunId
+        }
 
-        // If we renamed, move any cached env from raw -> effective
+        // If we renamed the runId, move any cached env metadata across so future sections still get it.
         if (effectiveRunId != rawRunId) {
             pendingEnv[rawRunId]?.let { triple ->
                 pendingEnv[effectiveRunId] = triple
@@ -431,17 +438,41 @@ class UploadServer(
             }
         }
 
-        // Staging filesystem
-        val runFolderName = "${effectiveRunId}__${iniName}"
-        val sectionName = (sectionParam?.ifBlank { null }
-            ?: zipFilename.removeSuffix(".zip").removeSuffix(".ZIP")
+        // --- Work out a human-readable section label.
+        //
+        // Example incoming names:
+        //   zipFilename: "run123_section002_part001.zip"
+        //   sectionParam query: "660nm"
+        //
+        // We prefer the provided &section= name, else derive something from filename.
+        //
+        val sectionNameGuess = sectionParam?.ifBlank { null }
+            ?: zipFilename
+                .removeSuffix(".zip")
+                .removeSuffix(".ZIP")
                 .substringAfter("${effectiveRunId}_", missingDelimiterValue = "section")
-                .ifBlank { "section" })
+                .ifBlank { "section" }
 
+        val sectionLabel = String.format(
+            Locale.US,
+            "Section %03d (%s)",
+            sectionIndex,
+            sectionNameGuess
+        )
+
+        // --- Create folders on disk to hold extracted images for this run/section.
+        //
+        // On-disk layout (per device, not DB):
+        //   Sessions/PMFI/<runId>__<iniName>/section_003__660nm/<actual PNGs...>
+        //
         val pmfiRoot   = File(sessionsRoot, "PMFI").apply { mkdirs() }
-        val runDir     = File(pmfiRoot, runFolderName).apply { mkdirs() }
-        val sectionDir = File(runDir, String.format(Locale.US, "section_%03d__%s", sectionIndex, sectionName)).apply { mkdirs() }
+        val runDir     = File(pmfiRoot, "${effectiveRunId}__${iniName}").apply { mkdirs() }
+        val sectionDir = File(
+            runDir,
+            String.format(Locale.US, "section_%03d__%s", sectionIndex, sectionNameGuess)
+        ).apply { mkdirs() }
 
+        // Move the uploaded ZIP into that section folder, then unzip.
         val savedZip = File(sectionDir, zipFilename)
         try {
             Log.i(TAG, "PMFI ZIP: saving -> ${savedZip.absolutePath}")
@@ -451,44 +482,54 @@ class UploadServer(
         }
 
         val extractedPngs = unzipPngs(savedZip, sectionDir)
-        Log.i(TAG, "PMFI ZIP -> run=$effectiveRunId ini=$iniName sec=$sectionIndex part=$partParam files=${extractedPngs.size}")
+        Log.i(
+            TAG,
+            "PMFI ZIP -> run=$effectiveRunId ini=$iniName sec=$sectionIndex part=$partParam files=${extractedPngs.size}"
+        )
 
-        // In-memory aggregate for this run
-        val run = pmfiRuns.getOrPut(effectiveRunId) { RunTracker(runId = effectiveRunId) }
-        run.iniName = iniName
-        sectionTotalFrames?.let { run.expectedFramesPerSection[sectionIndex] = it }
+        // --- Update in-memory tracker for progress accounting.
+        //
+        // pmfiRuns tracks everything we've received for this runId so far, grouped by sectionIndex.
+        val runTracker = pmfiRuns.getOrPut(effectiveRunId) { RunTracker(runId = effectiveRunId) }
+        runTracker.iniName = iniName
+        sectionTotalFrames?.let { runTracker.expectedFramesPerSection[sectionIndex] = it }
+        val sectionList = runTracker.sectionPngs.getOrPut(sectionIndex) {
+            synchronizedList(mutableListOf())
+        }
+        sectionList.addAll(extractedPngs)
+        touchRun(runTracker)
 
-        val list = run.sectionPngs.getOrPut(sectionIndex) { synchronizedList(mutableListOf()) }
-        list.addAll(extractedPngs)
+        // --- Write/update DB row for THIS section right now.
+        //
+        // This is the important part: we now persist ONE row per (runId, sectionIndex).
+        // Room will merge imagePaths across parts of the same section.
+        upsertPmfiSectionRow(
+            runId = effectiveRunId,
+            sectionIndex = sectionIndex,
+            iniName = iniName,
+            sectionLabel = sectionLabel,
+            allPngsForSection = sectionList.toList() // full list so far for this section
+        )
 
-        // Progress (total frames across sections so far)
-        val totalSoFar = run.sectionPngs.values.sumOf { it.size }
+        // --- Progress broadcast (for UI live progress bars etc.).
+        //
+        // totalSoFar = total frames across ALL sections we've seen for this run so far.
+        val totalSoFar = runTracker.sectionPngs.values.sumOf { it.size }
         UploadProgressBus.uploadProgress.postValue(effectiveRunId to totalSoFar)
 
-        touchRun(run)
-
-        // Finalise on explicit flag OR when all sections met their expected counts
-        if (finalFlag || allSectionsComplete(run)) {
-            finalizeRunMergeOrInsert(
-                runId = effectiveRunId,
-                run = run,
-                reason = if (finalFlag) "explicit_final_flag" else "all_sections_meet_expected"
-            )
-        }
-
-        return ok("ZIP accepted (${extractedPngs.size} frames), run=$effectiveRunId section=$sectionIndex part=$partParam")
+        // NOTE: We intentionally DO NOT "finalise" the run as a single row.
+        // Every section is already in the DB as its own record where Gallery can see it.
+        // We just acknowledge receipt.
+        return ok(
+            "ZIP accepted (${extractedPngs.size} frames), " +
+                    "run=$effectiveRunId section=$sectionIndex part=$partParam"
+        )
     }
+
 
     private fun <T> blockingIo(block: suspend () -> T): T =
         kotlinx.coroutines.runBlocking { withContext(Dispatchers.IO) { block() } }
 
-    private fun allSectionsComplete(run: RunTracker): Boolean {
-        if (run.expectedFramesPerSection.isEmpty()) return false
-        // Every section that has an expectation must have >= that many PNGs
-        return run.expectedFramesPerSection.all { (sec, expected) ->
-            (run.sectionPngs[sec]?.size ?: 0) >= expected
-        }
-    }
 
     private fun handlePng(
         sessionId: String,
@@ -513,6 +554,7 @@ class UploadServer(
         UploadProgressBus.uploadProgress.postValue(sessionId to list.size)
         Log.i(TAG, "PNG saved: '$filename' (session=$sessionId, count=${list.size}, pmfi=$isPmfi)")
 
+        // ✅ ONLY finalize AMSI bursts (16-frame captures)
         if (!isPmfi && list.size == IMAGES_PER_AMSI && finalisedKeys.add(sessionId)) {
             val completedAt = System.currentTimeMillis()
             insertSessionAsync(
@@ -521,19 +563,16 @@ class UploadServer(
                 type = "AMSI",
                 label = null,
                 completedAtMillis = completedAt,
-                runId = sessionId
+                runId = sessionId // we store runId=sessionId for AMSI
             )
             amsiUploads.remove(sessionId)
             lastSeenAt.remove(sessionId)
         }
 
-        if (isPmfi && AUTO_FINALISE_PMFI_STREAM) {
-            schedulePmfiStreamIdleCheck(sessionId)
-        }
-
         cleanupStaleSessions()
         return ok("File saved: $filename")
     }
+
 
     // --------------------------------------------------------------------------------------------
     // Helpers
@@ -584,31 +623,7 @@ class UploadServer(
         return out.sorted()
     }
 
-    private fun schedulePmfiStreamIdleCheck(sessionId: String) {
-        val key = sessionId
-        lastSeenAt[key] = System.currentTimeMillis()
-        scope.launch {
-            delay(PMFI_STREAM_IDLE_FINALISE_MS)
-            val last = lastSeenAt[key] ?: return@launch
-            if (System.currentTimeMillis() - last >= PMFI_STREAM_IDLE_FINALISE_MS) {
-                if (finalisedKeys.add(key)) {
-                    val paths = amsiUploads[key]?.toList().orEmpty()
-                    if (paths.isNotEmpty()) {
-                        val completedAt = System.currentTimeMillis()
-                        insertSessionAsync(
-                            key = key,
-                            imagePaths = paths,
-                            type = "PMFI",
-                            label = "stream",
-                            completedAtMillis = completedAt
-                        )
-                    }
-                    amsiUploads.remove(key)
-                    lastSeenAt.remove(key)
-                }
-            }
-        }
-    }
+
 
     private fun cleanupStaleSessions() {
         val now = System.currentTimeMillis()
@@ -620,7 +635,6 @@ class UploadServer(
             Log.i(TAG, "Session '$id' timed out; clearing trackers.")
             amsiUploads.remove(id)
             lastSeenAt.remove(id)
-            finalisedKeys.remove(id)
         }
     }
 
@@ -647,6 +661,7 @@ class UploadServer(
 
         val fused = LocationServices.getFusedLocationProviderClient(context)
 
+        // if we can't resolve location fast, we still insert after timeout
         val fallbackJob = scope.launch {
             delay(LOCATION_TIMEOUT_MS)
             Log.w(TAG, "Location timeout; inserting '$key' with Unknown.")
@@ -667,27 +682,46 @@ class UploadServer(
             fused.lastLocation
                 .addOnSuccessListener { loc ->
                     fallbackJob.cancel()
-                    val locationStr = loc?.let {
-                        try {
+
+                    val locString = if (loc != null) {
+                        // Always have at least lat,lon
+                        val basic = String.format(
+                            Locale.US,
+                            "%.5f,%.5f",
+                            loc.latitude,
+                            loc.longitude
+                        )
+
+                        // Try reverse geocode, but if it fails we still keep basic
+                        val pretty = try {
                             val geocoder = Geocoder(context, Locale.getDefault())
-                            val list = geocoder.getFromLocation(it.latitude, it.longitude, 1)
+                            val list = geocoder.getFromLocation(loc.latitude, loc.longitude, 1)
                             if (!list.isNullOrEmpty()) {
                                 val a = list[0]
                                 val city = a.locality ?: ""
                                 val area = a.subAdminArea ?: ""
                                 val country = a.countryName ?: ""
-                                listOf(city, area, country).filter { s -> s.isNotBlank() }
+                                listOf(city, area, country)
+                                    .filter { s -> s.isNotBlank() }
                                     .joinToString(", ")
-                                    .ifBlank { "${it.latitude},${it.longitude}" }
-                            } else "${it.latitude},${it.longitude}"
-                        } catch (_: Exception) {
-                            "${it.latitude},${it.longitude}"
+                                    .ifBlank { basic }
+                            } else {
+                                basic
+                            }
+                        } catch (geocodeErr: Exception) {
+                            Log.w(TAG, "Geocoder failed: ${geocodeErr.message}")
+                            basic
                         }
-                    } ?: "Unknown"
+
+                        pretty
+                    } else {
+                        "Unknown"
+                    }
+
                     saveSessionToDb(
                         completedAtMillis = completedAtMillis,
                         timestampStr = tsStr,
-                        locationStr = locationStr,
+                        locationStr = locString,
                         imagePaths = imagePaths,
                         type = type,
                         label = label,
@@ -727,6 +761,76 @@ class UploadServer(
             )
         }
     }
+    private fun getBestEffortLocationString(
+        onResult: (String) -> Unit
+    ) {
+        val fused = LocationServices.getFusedLocationProviderClient(context)
+
+        // We'll race fused.lastLocation against a timeout, just like AMSI does
+        scope.launch {
+            // timeout job
+            val timeout = launch {
+                delay(LOCATION_TIMEOUT_MS)
+                onResult("Unknown")
+            }
+
+            try {
+                fused.lastLocation
+                    .addOnSuccessListener { loc ->
+                        if (!timeout.isActive) return@addOnSuccessListener
+                        timeout.cancel()
+
+                        if (loc == null) {
+                            onResult("Unknown")
+                            return@addOnSuccessListener
+                        }
+
+                        val basic = String.format(
+                            Locale.US,
+                            "%.5f,%.5f",
+                            loc.latitude,
+                            loc.longitude
+                        )
+
+                        // Try reverse geocode to make it pretty, fallback to lat,lon
+                        val pretty = try {
+                            val geocoder = Geocoder(context, Locale.getDefault())
+                            val list = geocoder.getFromLocation(loc.latitude, loc.longitude, 1)
+                            if (!list.isNullOrEmpty()) {
+                                val a = list[0]
+                                val city = a.locality ?: ""
+                                val area = a.subAdminArea ?: ""
+                                val country = a.countryName ?: ""
+                                listOf(city, area, country)
+                                    .filter { s -> s.isNotBlank() }
+                                    .joinToString(", ")
+                                    .ifBlank { basic }
+                            } else {
+                                basic
+                            }
+                        } catch (geocodeErr: Exception) {
+                            Log.w(TAG, "Geocoder failed in PMFI row: ${geocodeErr.message}")
+                            basic
+                        }
+
+                        onResult(pretty)
+                    }
+                    .addOnFailureListener { err ->
+                        if (!timeout.isActive) return@addOnFailureListener
+                        timeout.cancel()
+                        Log.w(TAG, "lastLocation failed in PMFI row: ${err.message}")
+                        onResult("Unknown")
+                    }
+            } catch (e: Exception) {
+                if (timeout.isActive) {
+                    timeout.cancel()
+                    Log.w(TAG, "Location flow threw in PMFI row: ${e.message}")
+                    onResult("Unknown")
+                }
+            }
+        }
+    }
+
 
     private fun saveSessionToDb(
         completedAtMillis: Long,
@@ -833,7 +937,6 @@ class UploadServer(
             appendLine("Trackers:")
             appendLine("  amsiUploads: ${amsiUploads.keys}")
             appendLine("  lastSeenAt : ${lastSeenAt.keys}")
-            appendLine("  finalised  : ${finalisedKeys.size}")
             appendLine("  dbInserted : ${dbInserted.size}")
         }
         return ok(b.toString())

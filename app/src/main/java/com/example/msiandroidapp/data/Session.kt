@@ -12,10 +12,9 @@ import androidx.room.PrimaryKey
 @Entity(
     tableName = "sessions",
     indices = [
-        // Enforce a single logical row per PMFI runId.
-        // (SQLite allows multiple NULLs, so AMSI rows without runId would still be allowed,
-        // but we set runId=sessionId for AMSI so metadata can match.)
-        Index(value = ["runId"], unique = true)
+        // We want at most one row per PMFI section.
+        // runId may repeat across sections, but (runId, sectionIndex) should be unique.
+        Index(value = ["runId", "sectionIndex"], unique = true)
     ]
 )
 data class Session(
