@@ -10,7 +10,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 
 @Database(
     entities = [Session::class, CalibrationProfile::class],
-    version = 10,
+    version = 12,
     exportSchema = true
 )
 @TypeConverters(Converters::class)
@@ -124,21 +124,15 @@ abstract class AppDatabase : RoomDatabase() {
             override fun migrate(db: SupportSQLiteDatabase) {
                 if (!tableExists(db, "sessions")) return
 
-                // 1. Drop legacy unique index on runId if it exists.
-                // SQLite doesn't have "DROP INDEX IF EXISTS" in older APIs via SupportSQLiteDatabase,
-                // but execSQL will just throw if it doesn't exist, so wrap in runCatching.
                 runCatching {
                     db.execSQL("DROP INDEX IF EXISTS index_sessions_runId")
                 }
 
-                // 2. Create the new composite unique index.
-                // Note: sectionIndex can be NULL for AMSI rows. SQLite allows multiple NULLs in a UNIQUE index,
-                // so AMSI rows won't collide with each other even though runId=sessionId there.
                 db.execSQL(
                     """
-            CREATE UNIQUE INDEX IF NOT EXISTS index_sessions_runId_sectionIndex
-            ON sessions(runId, sectionIndex)
-            """.trimIndent()
+                    CREATE UNIQUE INDEX IF NOT EXISTS index_sessions_runId_sectionIndex
+                    ON sessions(runId, sectionIndex)
+                    """.trimIndent()
                 )
             }
         }
@@ -162,25 +156,140 @@ abstract class AppDatabase : RoomDatabase() {
                 }
             }
         }
+
+        /**
+         * v9 -> v10:
+         * - Ensure composite unique index (runId, sectionIndex)
+         */
         private val MIGRATION_9_10 = object : Migration(9, 10) {
             override fun migrate(db: SupportSQLiteDatabase) {
                 if (!tableExists(db, "sessions")) return
 
-                // 1. Drop legacy unique index on runId alone.
-                // Some devices (older schema) might still have index_sessions_runId.
-                // "DROP INDEX IF EXISTS" is valid SQL, but SupportSQLiteDatabase.execSQL
-                // may still throw on some OEM sqlite builds, so we runCatching it.
                 runCatching {
                     db.execSQL("DROP INDEX IF EXISTS index_sessions_runId")
                 }
 
-                // 2. Create composite unique index (runId, sectionIndex)
-                // Safeguarded with IF NOT EXISTS in case we already created it in an earlier hotfix.
                 db.execSQL(
                     """
-            CREATE UNIQUE INDEX IF NOT EXISTS index_sessions_runId_sectionIndex
-            ON sessions(runId, sectionIndex)
-            """.trimIndent()
+                    CREATE UNIQUE INDEX IF NOT EXISTS index_sessions_runId_sectionIndex
+                    ON sessions(runId, sectionIndex)
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * v10 -> v11:
+         * - (old version) Recreate calibration_profiles without numeric id
+         */
+        private val MIGRATION_10_11 = object : Migration(10, 11) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Drop old table if it exists
+                if (tableExists(db, "calibration_profiles")) {
+                    db.execSQL("DROP TABLE calibration_profiles")
+                }
+
+                // Recreate with runId as PRIMARY KEY (legacy v11 schema)
+                db.execSQL(
+                    """
+                    CREATE TABLE IF NOT EXISTS calibration_profiles (
+                        runId TEXT NOT NULL PRIMARY KEY,
+                        completedAtMillis INTEGER NOT NULL,
+                        timestampStr TEXT NOT NULL,
+                        imagePathsJson TEXT NOT NULL,
+                        ledNormsJson TEXT,
+                        targetDn REAL,
+                        envTempC REAL,
+                        envHumidity REAL,
+                        envTsUtc TEXT,
+                        tsUtcOverall TEXT,
+                        summary TEXT
+                    )
+                    """.trimIndent()
+                )
+            }
+        }
+
+        /**
+         * v11 -> v12:
+         * - Add numeric auto-increment id to calibration_profiles for display/selection.
+         * - We can't just ALTER TABLE to add "INTEGER PRIMARY KEY AUTOINCREMENT"
+         *   to an existing table, so we:
+         *      1. CREATE a new table with the final schema.
+         *      2. COPY data from old table.
+         *      3. DROP old table.
+         *      4. RENAME new -> calibration_profiles.
+         *
+         *   New schema:
+         *      id INTEGER PRIMARY KEY AUTOINCREMENT
+         *      runId TEXT NOT NULL UNIQUE
+         *      ...rest of columns same as before...
+         */
+        private val MIGRATION_11_12 = object : Migration(11, 12) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+
+                // 1. Create a temp table with the new schema.
+                db.execSQL(
+                    """
+                    CREATE TABLE calibration_profiles_new (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        runId TEXT NOT NULL UNIQUE,
+                        completedAtMillis INTEGER NOT NULL,
+                        timestampStr TEXT NOT NULL,
+                        imagePathsJson TEXT NOT NULL,
+                        ledNormsJson TEXT,
+                        targetDn REAL,
+                        envTempC REAL,
+                        envHumidity REAL,
+                        envTsUtc TEXT,
+                        tsUtcOverall TEXT,
+                        summary TEXT
+                    )
+                    """.trimIndent()
+                )
+
+                // 2. Copy rows from old table into new table.
+                // id will autogenerate here.
+                db.execSQL(
+                    """
+                    INSERT INTO calibration_profiles_new (
+                        runId,
+                        completedAtMillis,
+                        timestampStr,
+                        imagePathsJson,
+                        ledNormsJson,
+                        targetDn,
+                        envTempC,
+                        envHumidity,
+                        envTsUtc,
+                        tsUtcOverall,
+                        summary
+                    )
+                    SELECT
+                        runId,
+                        completedAtMillis,
+                        timestampStr,
+                        imagePathsJson,
+                        ledNormsJson,
+                        targetDn,
+                        envTempC,
+                        envHumidity,
+                        envTsUtc,
+                        tsUtcOverall,
+                        summary
+                    FROM calibration_profiles
+                    """.trimIndent()
+                )
+
+                // 3. Drop the old table.
+                db.execSQL("DROP TABLE calibration_profiles")
+
+                // 4. Rename the new table to the final name.
+                db.execSQL(
+                    """
+                    ALTER TABLE calibration_profiles_new
+                    RENAME TO calibration_profiles
+                    """.trimIndent()
                 )
             }
         }
@@ -198,7 +307,9 @@ abstract class AppDatabase : RoomDatabase() {
                         MIGRATION_6_7,
                         MIGRATION_7_8,
                         MIGRATION_8_9,
-                        MIGRATION_9_10
+                        MIGRATION_9_10,
+                        MIGRATION_10_11,
+                        MIGRATION_11_12
                     )
                     .fallbackToDestructiveMigrationOnDowngrade()
                     .build()
@@ -212,7 +323,11 @@ abstract class AppDatabase : RoomDatabase() {
                 arrayOf(table)
             ).use { it.moveToFirst() }
 
-        private fun columnExists(db: SupportSQLiteDatabase, table: String, column: String): Boolean =
+        private fun columnExists(
+            db: SupportSQLiteDatabase,
+            table: String,
+            column: String
+        ): Boolean =
             db.query("PRAGMA table_info($table)").use { cursor ->
                 val nameIdx = cursor.getColumnIndex("name")
                 while (cursor.moveToNext()) {

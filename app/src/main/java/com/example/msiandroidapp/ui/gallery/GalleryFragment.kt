@@ -36,6 +36,7 @@ import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
+import java.util.Date
 
 class GalleryFragment : Fragment() {
 
@@ -80,7 +81,16 @@ class GalleryFragment : Fragment() {
         requireContext().getSharedPreferences("gallery_custom_names", Context.MODE_PRIVATE)
     }
     private fun spKeySession(id: Long) = "session_name_$id"
-    private fun spKeyCalib(id: Long) = "calib_name_$id"
+    private fun spKeyCalib(runId: String) = "calib_name_$runId"
+    // Returns a stable non-null Long for a calibration row.
+// If the row hasn't been assigned an autoincrement ID yet (id == null),
+// we fall back to a hash of runId shifted into a high range so it won't
+// collide with session IDs.
+    private fun stableCalibId(p: CalibrationProfile): Long {
+        return p.runId.hashCode().toLong() + 1_000_000_000_000L
+    }
+
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -136,10 +146,19 @@ class GalleryFragment : Fragment() {
                 toggleSelection(idForCalibration(c))
             },
             displayNameProvider = object : DisplayNameProvider {
-                override fun titleFor(session: Session): String = this@GalleryFragment.displayNameFor(session)
-                override fun subtitleFor(session: Session): String = this@GalleryFragment.subtitleFor(session)
-                override fun titleFor(cal: CalibrationProfile): String = this@GalleryFragment.displayNameFor(cal)
+                override fun titleFor(session: Session) =
+                    this@GalleryFragment.displayNameFor(session)
+
+                override fun subtitleFor(session: Session) =
+                    this@GalleryFragment.subtitleFor(session)
+
+                override fun titleFor(cal: CalibrationProfile) =
+                    this@GalleryFragment.displayNameFor(cal)
+
+                override fun subtitleFor(cal: CalibrationProfile) =
+                    this@GalleryFragment.subtitleFor(cal)
             }
+
         ).apply {
             onSelectionChanged = { hasSelection, count ->
                 backCallback.isEnabled = hasSelection
@@ -323,33 +342,61 @@ class GalleryFragment : Fragment() {
     private fun Session.isAMSI(): Boolean = type.equals("AMSI", ignoreCase = true)
     private fun Session.isPMFI(): Boolean = type.equals("PMFI", ignoreCase = true)
 
-    private fun sortTimestampForSession(session: Session): Long {
-        val parsed = runCatching { parseSessionDate(session.timestamp).time }.getOrNull()
-        if (parsed != null) return parsed
-        val newest = session.imagePaths.maxOfOrNull { path -> File(path).lastModified() }
-        return newest ?: 0L
-    }
 
     private fun sortKeyForItem(item: ResultListItem): Long {
         return when (item) {
-            is ResultListItem.SessionItem -> sortTimestampForSession(item.session)
-            is ResultListItem.CalibrationItem -> item.profile.createdAt
-            is ResultListItem.InProgress -> Long.MAX_VALUE // always "newest"
-        }
-    }
-    private fun stableIdForItem(item: ResultListItem): Long {
-        return when (item) {
-            is ResultListItem.SessionItem -> item.session.id
-            is ResultListItem.CalibrationItem -> 1_000_000_000_000L + item.profile.id
-            is ResultListItem.InProgress -> Long.MAX_VALUE - 1 // just something huge
+            is ResultListItem.SessionItem ->
+                stableMillisForSession(item.session)
+
+            is ResultListItem.CalibrationItem ->
+                stableMillisForCalibration(item.profile)
+
+            is ResultListItem.InProgress ->
+                Long.MAX_VALUE
         }
     }
 
+
+
+
+    private fun stableIdForItem(item: ResultListItem): Long {
+        return when (item) {
+            is ResultListItem.SessionItem     -> item.session.id
+            is ResultListItem.CalibrationItem -> stableCalibId(item.profile)
+            is ResultListItem.InProgress      -> Long.MAX_VALUE - 1
+        }
+    }
+
+    private fun stableMillisForSession(session: Session): Long {
+        // Prefer completedAtMillis if present, else createdAt, else 0
+        return when {
+            session.completedAtMillis != null && session.completedAtMillis > 0L ->
+                session.completedAtMillis
+            session.createdAt > 0L ->
+                session.createdAt
+            else ->
+                0L
+        }
+    }
+
+    private fun stableMillisForCalibration(profile: CalibrationProfile): Long {
+        // completedAtMillis is canonical for calibration runs
+        return profile.completedAtMillis
+    }
+
+
     // ---------- Selection ----------
     private fun idForSession(s: Session) = s.id
-    private fun idForCalibration(p: CalibrationProfile) = 1_000_000_000_000L + p.id
-    private fun isCalibrationId(id: Long) = id >= 1_000_000_000_000L
-    private fun calibIdFromSelId(id: Long) = id - 1_000_000_000_000L
+    private fun idForCalibration(p: CalibrationProfile) = stableCalibId(p)
+
+    private fun isCalibrationId(id: Long): Boolean {
+        return adapter.currentList.any { item ->
+            item is ResultListItem.CalibrationItem &&
+                    stableCalibId(item.profile) == id
+        }
+    }
+
+
     // Cached toolbar items
     private var menuItemRenameInline: MenuItem? = null
     private var filterAllItem: MenuItem? = null
@@ -472,21 +519,25 @@ class GalleryFragment : Fragment() {
 
     private fun openCalibration(profile: CalibrationProfile) {
         val wlToNorm = extractCalibrationMap(profile)
-        val whenStr = runCatching {
-            SimpleDateFormat("dd-MM-yyyy | HH:mm", Locale.getDefault())
-                .format(java.util.Date(profile.createdAt))
-        }.getOrElse { "—" }
+
+        val whenStr = profile.timestampStr.ifBlank {
+            runCatching {
+                SimpleDateFormat("dd-MM-yyyy | HH:mm", Locale.getDefault())
+                    .format(Date(profile.completedAtMillis))
+            }.getOrElse { "—" }
+        }
 
         val header = buildString {
             appendLine("Calibration Profile")
             appendLine("-------------------")
-            appendLine("Name: ${displayNameFor(profile)}")
+            appendLine("Run ID: ${profile.runId}")
             appendLine("When: $whenStr")
             if (!profile.summary.isNullOrBlank()) appendLine(profile.summary)
             appendLine()
             appendLine("Wavelength (nm)    Norm")
             appendLine("------------------------")
         }
+
         val body = buildString {
             AMSI_WAVELENGTHS.forEach { wl ->
                 val norm = wlToNorm[wl]
@@ -517,25 +568,26 @@ class GalleryFragment : Fragment() {
             .show()
     }
 
+
     // ---------- Rename ----------
     private fun promptRenameSelected() {
         if (selectedIds.size != 1) return
-        val sel = selectedIds.first()
-        val isCal = isCalibrationId(sel)
+
+        val maybeCal = getSingleSelectedCalibrationProfile()
+        val isCal = (maybeCal != null)
 
         val (currentTitle, setter) = if (isCal) {
-            val id = calibIdFromSelId(sel)
-            val existing = currentCalibrationById(id)?.let { displayNameFor(it) }
-                ?: prefs.getString(spKeyCalib(id), "") ?: ""
-            existing to { newName: String -> renameCalibration(id, newName) }
+            val prof = maybeCal!!
+            val existing = displayNameFor(prof)
+            existing to { newName: String -> renameCalibration(prof.runId, newName) }
         } else {
-            val id = sel
-            val session = currentSessionById(id)
+            val selSessionId = selectedIds.first()
+            val session = currentSessionById(selSessionId)
             val existing = displayNameFor(session)
-            existing to { newName: String -> renameSession(id, newName) }
+            existing to { newName: String -> renameSession(selSessionId, newName) }
         }
 
-        val input = android.widget.EditText(requireContext()).apply {
+    val input = android.widget.EditText(requireContext()).apply {
             hint = "Enter new name"
             setSingleLine(true)
             setText(currentTitle)
@@ -574,6 +626,68 @@ class GalleryFragment : Fragment() {
         "AMSI" -> "[AMSI]"
         else   -> "[${session.type.uppercase(Locale.ROOT)}]"
     }
+    private fun folderKindTagFor(session: Session): String {
+        // What shows up at the start of the folder name
+        return when (session.type.uppercase(Locale.ROOT)) {
+            "PMFI" -> "PMFI"
+            "AMSI" -> "AMSI"
+            else   -> session.type.uppercase(Locale.ROOT)
+        }
+    }
+
+    private fun pmfiInfoFor(session: Session): String {
+        // same cleaning as pmfiInfoForFilename, but we don't sanitize to underscores
+        // and we don't prepend "INI_" because this is for UI
+        val iniPretty = session.iniName
+            ?.trim()
+            ?.replace(Regex("^[a-f0-9]{16,}_?"), "") // kill long hex prefix (with or without underscore)
+            ?.removeSuffix(".ini")
+            ?.removeSuffix("_ini")
+            ?.takeIf { it.isNotBlank() }
+
+        val secPretty = session.label
+            ?.takeIf { it.isNotBlank() }
+
+        return listOfNotNull(iniPretty, secPretty)
+            .joinToString(" • ")
+    }
+
+    // Produces a FILENAME-SAFE PMFI slug for exports (ZIP folder names).
+// - Removes long hash-like ini names
+// - Converts spaces etc. to underscores via sanitizeName()
+// - Uses "__" separators instead of " • "
+// Result example:
+//   "INI_leafscan_v4__Section_000__sec_test_sine_part_001"
+    private fun pmfiInfoForFilename(session: Session): String {
+        // 1. Clean iniName aggressively
+        val rawIni = session.iniName?.trim().orEmpty()
+
+        // Strip:
+        //   - any leading 16+ hex chars (with or without underscore after)
+        //   - trailing ".ini"
+        //   - trailing "_ini"
+        // Then sanitize for filesystem use
+        val cleanedIni = rawIni
+            .replace(Regex("^[a-f0-9]{16,}_?"), "") // kill leading giant hex + optional underscore
+            .removeSuffix(".ini")
+            .removeSuffix("_ini")
+            .takeIf { it.isNotBlank() }
+            ?.let { "INI_${sanitizeName(it)}" } // prefix "INI_..." if we still have something
+            ?: ""  // if nothing left, just drop it
+
+        // 2. Section/wavelength label
+        val cleanedSection = session.label
+            ?.takeIf { it.isNotBlank() }
+            ?.let { sanitizeName(it) } // e.g. "Section_000__sec_test_sine_part_001"
+            ?: ""
+
+        // 3. Stitch pieces with "__", skipping blanks neatly
+        return listOf(cleanedIni, cleanedSection)
+            .filter { it.isNotBlank() }
+            .joinToString("__")
+    }
+
+
 
     private fun kindPrefixFor(cal: CalibrationProfile) = "[CALIBRATION]"
     private fun renameSession(sessionId: Long, newName: String) {
@@ -582,11 +696,21 @@ class GalleryFragment : Fragment() {
         msg("Session renamed.")
     }
 
-    private fun renameCalibration(calibId: Long, newName: String) {
-        prefs.edit().putString(spKeyCalib(calibId), newName).apply()
-        refreshDisplayNameForId(1_000_000_000_000L + calibId)
+    private fun renameCalibration(runId: String, newName: String) {
+        prefs.edit().putString(spKeyCalib(runId), newName).apply()
+
+        // find matching adapter row and notify it so title refreshes
+        val index = adapter.currentList.indexOfFirst { item ->
+            item is ResultListItem.CalibrationItem &&
+                    item.profile.runId == runId
+        }
+        if (index >= 0) {
+            adapter.notifyItemChanged(index, ResultsAdapter.PAYLOAD_TITLE_CHANGED)
+        }
+
         msg("Calibration renamed.")
     }
+
 
     // ---------- Share / Delete ----------
     private fun shareSelected() {
@@ -596,14 +720,19 @@ class GalleryFragment : Fragment() {
         val sessions = mutableListOf<Session>()
         val calibs   = mutableListOf<CalibrationProfile>()
 
+        // Figure out what was selected
         current.forEach { item ->
             when (item) {
-                is ResultListItem.SessionItem ->
-                    if (chosen.contains(item.session.id))
+                is ResultListItem.SessionItem -> {
+                    if (chosen.contains(item.session.id)) {
                         sessions.add(item.session)
-                is ResultListItem.CalibrationItem ->
-                    if (chosen.contains(1_000_000_000_000L + item.profile.id))
+                    }
+                }
+                is ResultListItem.CalibrationItem -> {
+                    if (chosen.contains(stableCalibId(item.profile))) {
                         calibs.add(item.profile)
+                    }
+                }
                 is ResultListItem.InProgress -> Unit
             }
         }
@@ -611,8 +740,31 @@ class GalleryFragment : Fragment() {
         lifecycleScope.launch(Dispatchers.IO) {
             try {
                 val uris = arrayListOf<Uri>()
-                buildSessionsZip(sessions)?.let { uris.add(fileUri(it)) }
-                calibs.forEach { makeCalibrationJsonFile(it)?.let { f -> uris.add(fileUri(f)) } }
+
+                // 1. Only include a sessions ZIP if at least one session was selected
+                if (sessions.isNotEmpty()) {
+                    buildSessionsZip(sessions)?.let { sessionsZip ->
+                        // sanity check it actually has bytes on disk
+                        if (sessionsZip.exists() && sessionsZip.length() > 0L) {
+                            uris.add(fileUri(sessionsZip))
+                        }
+                    }
+                }
+
+                // 2. For each calibration: add calibration ZIP + calibration JSON
+                calibs.forEach { calProfile ->
+                    buildCalibrationZip(calProfile)?.let { calZip ->
+                        if (calZip.exists() && calZip.length() > 0L) {
+                            uris.add(fileUri(calZip))
+                        }
+                    }
+
+                    makeCalibrationJsonFile(calProfile)?.let { jsonFile ->
+                        if (jsonFile.exists() && jsonFile.length() > 0L) {
+                            uris.add(fileUri(jsonFile))
+                        }
+                    }
+                }
 
                 withContext(Dispatchers.Main) {
                     if (uris.isEmpty()) {
@@ -621,17 +773,21 @@ class GalleryFragment : Fragment() {
                     }
 
                     val share = Intent(Intent.ACTION_SEND_MULTIPLE).apply {
-                        type = "*/*" // ZIP + JSON
+                        type = "*/*"
                         putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris)
                         addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                     }
 
-                    // Grant URI permission to all potential targets
+                    // Grant URI read permissions to all possible targets
                     val targets = requireContext().packageManager.queryIntentActivities(share, 0)
                     targets.forEach { ri ->
                         val pkg = ri.activityInfo.packageName
                         uris.forEach { uri ->
-                            requireContext().grantUriPermission(pkg, uri, Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                            requireContext().grantUriPermission(
+                                pkg,
+                                uri,
+                                Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            )
                         }
                     }
 
@@ -639,27 +795,34 @@ class GalleryFragment : Fragment() {
                     clearSelectionAndExitMode()
                 }
             } catch (e: Exception) {
-                withContext(Dispatchers.Main) { msg("Share failed: ${e.message}") }
+                withContext(Dispatchers.Main) {
+                    msg("Share failed: ${e.message}")
+                }
             }
         }
     }
+
 
     private fun deleteSelected() {
         val current = adapter.currentList
         val chosen = selectedIds.toSet()
 
         val sessions = mutableListOf<Session>()
-        val calibs   = mutableListOf<CalibrationProfile>()
+        val calibs = mutableListOf<CalibrationProfile>()
 
         current.forEach { item ->
             when (item) {
                 is ResultListItem.SessionItem ->
-                    if (chosen.contains(item.session.id)) sessions.add(item.session)
+                    if (chosen.contains(item.session.id))
+                        sessions.add(item.session)
+
                 is ResultListItem.CalibrationItem ->
-                    if (chosen.contains(1_000_000_000_000L + item.profile.id)) calibs.add(item.profile)
+                    if (chosen.contains(stableCalibId(item.profile)))
+                        calibs.add(item.profile)
                 is ResultListItem.InProgress -> Unit
             }
         }
+
 
         if (sessions.isEmpty() && calibs.isEmpty()) { msg("No items selected."); return }
 
@@ -690,9 +853,10 @@ class GalleryFragment : Fragment() {
 
                     // Calibrations: DB + prefs
                     calibs.forEach { c ->
-                        prefs.edit().remove(spKeyCalib(c.id)).apply()
-                        runCatching { calibDao.delete(c) }
+                        prefs.edit().remove(spKeyCalib(c.runId)).apply()
+                        runCatching { calibDao.deleteByRunId(c.runId) }
                     }
+
 
                     withContext(Dispatchers.Main) {
                         clearSelectionAndExitMode()
@@ -711,25 +875,34 @@ class GalleryFragment : Fragment() {
 
     private fun makeCalibrationJsonFile(profile: CalibrationProfile): File? = runCatching {
         val dir = File(requireContext().cacheDir, "exports").apply { mkdirs() }
-        val file = File(dir, "calibration_${profile.id}.json")
+        val file = File(dir, "calibration_${profile.runId}.json")
 
         val wlToNorm = extractCalibrationMap(profile)
+
         val root = JSONObject().apply {
-            put("id", profile.id)
-            put("name", displayNameFor(profile))
-            put("summary", profile.summary)
-            put("createdAt", profile.createdAt)
+            put("runId", profile.runId)
+            put("summary", profile.summary ?: "")
+            put("completedAtMillis", profile.completedAtMillis)
+            put("timestampStr", profile.timestampStr)
+
+            // norms object: wavelength -> value
             val normsObj = JSONObject()
-            wlToNorm.toSortedMap().forEach { (wl, v) -> normsObj.put(wl.toString(), v) }
+            wlToNorm.toSortedMap().forEach { (wl, v) ->
+                normsObj.put(wl.toString(), v)
+            }
             put("norms", normsObj)
-            val arr = JSONArray()
-            (profile.ledNorms).forEach { arr.put(it) }
+
+            // raw LED norms list if you want to keep it
+            // ledNormsJson is already a JSON array string, so parse+re-put
+            val arr = JSONArray(profile.ledNormsJson ?: "[]")
             put("led_norms", arr)
         }
 
         FileOutputStream(file).use { it.write(root.toString(2).toByteArray()) }
         file
     }.getOrNull()
+
+
 
     private fun wavelengthForIndex(indexInSession: Int): Int? =
         AMSI_WAVELENGTHS.getOrNull(indexInSession)
@@ -800,19 +973,49 @@ class GalleryFragment : Fragment() {
 
     private fun buildFolderName(session: Session): String {
         val (d, t) = datePartsForName(session)
-        val loc = (session.location).trim().ifEmpty { "UnknownLoc" }
+
+        val loc = session.location.trim().ifEmpty { "UnknownLoc" }
+
         val custom = prefs.getString(spKeySession(session.id), "")?.trim().orEmpty()
-        val title = if (custom.isNotEmpty()) sanitizeName(custom) else sanitizeName(defaultSessionTitle(session))
+        val baseTitle = if (custom.isNotEmpty()) {
+            sanitizeName(custom)
+        } else {
+            sanitizeName(defaultSessionTitle(session))
+        }
 
         val envSlug = run {
             val temp = session.envTempC?.let { String.format(Locale.US, "%.1f", it) } ?: "NA"
             val rh   = session.envHumidity?.let { String.format(Locale.US, "%.0f", it) } ?: "NA"
-            // Keep it short and filename-safe
-            "___Env_T_${temp}C___RH_${rh}pc"
+            "Env_T_${temp}C__RH_${rh}pc"
         }
 
-        return "${title}___Date_${d}___Time_${t}___Location_${sanitizeName(loc)}$envSlug"
+        val kindTag = folderKindTagFor(session) // "PMFI", "AMSI", ...
+
+        // >>> THIS IS THE IMPORTANT CHANGE <<<
+        // For PMFI, we build a filename-safe LED/INI section slug with hash stripped.
+        val pmfiSlugForFile = if (session.isPMFI()) {
+            pmfiInfoForFilename(session).takeIf { it.isNotBlank() }
+        } else null
+
+        // Final shape in the ZIP:
+        // [PMFI]_Session_149__Date_28_10_2025__Time_14_59_56__Loc_Stretford__Greater_Manchester...__INI_leafscan_v4__Section_000__sec_test_sine_part_001__Env_T_24.6C__RH_71pc
+        // (No stupid giant hash anymore.)
+        return buildString {
+            append("[").append(kindTag).append("]_")
+            append(baseTitle)
+            append("__Date_").append(d)
+            append("__Time_").append(t)
+            append("__Loc_").append(sanitizeName(loc))
+
+            if (pmfiSlugForFile != null) {
+                append("__").append(pmfiSlugForFile)
+            }
+
+            append("__").append(envSlug)
+        }
     }
+
+
 
 
     private fun buildSessionsZip(sessions: List<Session>): File? = runCatching {
@@ -907,39 +1110,203 @@ class GalleryFragment : Fragment() {
 
     private fun displayNameFor(session: Session?): String {
         if (session == null) return "Session ${System.currentTimeMillis()}"
-        val custom = prefs.getString(spKeySession(session.id), "")?.trim().orEmpty()
-        val base   = if (custom.isNotEmpty()) custom else "Session ${session.id}"
-        return base
-    }
 
-    private fun displayNameFor(profile: CalibrationProfile): String {
-        val local = prefs.getString(spKeyCalib(profile.id), "")?.trim().orEmpty()
+        // User rename
+        val custom = prefs.getString(spKeySession(session.id), "")?.trim().orEmpty()
+        val fallbackBaseTitle = "Session ${session.id}"
+
+        // For PMFI we also have rich label info like "Section 000 (sec.test_sine:part_001)"
+        val pmfiBits = pmfiInfoFor(session).trim()
+
         return when {
-            local.isNotEmpty()          -> local
-            profile.name.isNotBlank()   -> profile.name
-            else                        -> "Calibration ${profile.id}"
+            // PMFI: show just the interesting PMFI label if we have it.
+            session.isPMFI() -> {
+                when {
+                    pmfiBits.isNotEmpty() -> pmfiBits
+                    custom.isNotEmpty()   -> custom
+                    else                  -> fallbackBaseTitle
+                }
+            }
+
+            // AMSI (and anything else that's essentially "normal capture"):
+            session.isAMSI() -> {
+                when {
+                    custom.isNotEmpty()   -> custom
+                    else                  -> fallbackBaseTitle
+                }
+            }
+
+            // Any other type
+            else -> {
+                when {
+                    custom.isNotEmpty()   -> custom
+                    else                  -> fallbackBaseTitle
+                }
+            }
         }
     }
 
+    private fun displayNameFor(profile: CalibrationProfile): String {
+        val num = profile.id ?: stableCalibId(profile)
+        return "Calibration $num"
+    }
+
+
+
+    private fun getSingleSelectedCalibrationProfile(): CalibrationProfile? {
+        if (selectedIds.size != 1) return null
+        val selStableId = selectedIds.first()
+
+        val match = adapter.currentList.firstOrNull { item ->
+            item is ResultListItem.CalibrationItem &&
+                    stableCalibId(item.profile) == selStableId
+        } as? ResultListItem.CalibrationItem
+
+        return match?.profile
+    }
+
+
+
     private fun subtitleFor(session: Session): String {
+        // 1. Pick a base timestamp
+        val baseMs = session.completedAtMillis ?: session.createdAt
         val tz = java.util.TimeZone.getTimeZone("Europe/London")
-        val dt = parseSessionDate(session.timestamp)
 
-        val timeFmt = java.text.SimpleDateFormat("HH:mm:ss", Locale.getDefault()).apply { timeZone = tz }
-        val dateFmt = java.text.SimpleDateFormat("dd-MM-yyyy", Locale.getDefault()).apply { timeZone = tz }
+        val timeFmt = java.text.SimpleDateFormat("HH:mm:ss", Locale.getDefault()).apply {
+            timeZone = tz
+        }
+        val dateFmt = java.text.SimpleDateFormat("dd-MM-yyyy", Locale.getDefault()).apply {
+            timeZone = tz
+        }
 
-        val timeStr = timeFmt.format(dt)                          // e.g., "14:07:12"
-        val dateStr = dateFmt.format(dt)                          // e.g., "23-10-2025"
-        val locStr  = session.location.trim().ifEmpty { "Unknown" }
+        val dt      = java.util.Date(baseMs)
+        val timeStr = timeFmt.format(dt)        // "14:59:56"
+        val dateStr = dateFmt.format(dt)        // "28-10-2025"
 
-        val tempStr = session.envTempC?.let { "T ${String.format(Locale.US, "%.1f", it)}°C" }
-        val rhStr   = session.envHumidity?.let { "RH ${String.format(Locale.US, "%.0f", it)}%" }
+        val locStr = session.location.trim().ifEmpty { "Unknown" }
 
+        val tempStr = session.envTempC?.let {
+            "T ${String.format(Locale.US, "%.1f", it)}°C"
+        }
+        val rhStr = session.envHumidity?.let {
+            "RH ${String.format(Locale.US, "%.0f", it)}%"
+        }
+
+        // Core info applies to EVERY type now
+        // For PMFI we DO NOT prepend pmfiBits anymore, because it's already in the title.
         return listOfNotNull(timeStr, dateStr, locStr, tempStr, rhStr)
             .filter { it.isNotBlank() }
             .joinToString(" | ")
     }
 
+
+
+
+
+    private fun subtitleFor(profile: CalibrationProfile): String {
+        // 1. Try to get a reliable timestamp
+        val millisCandidate: Long? = when {
+            profile.completedAtMillis != 0L -> profile.completedAtMillis
+            !profile.timestampStr.isNullOrBlank() -> {
+                val raw = profile.timestampStr.trim()
+                val fmts = listOf(
+                    java.text.SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.getDefault()),
+                    java.text.SimpleDateFormat("dd-MM-yyyy | HH:mm", Locale.getDefault())
+                )
+                fmts.firstNotNullOfOrNull { fmt ->
+                    runCatching { fmt.parse(raw)?.time }.getOrNull()
+                }
+            }
+            else -> null
+        }
+
+        // 2. Format date + time
+        val tz = java.util.TimeZone.getTimeZone("Europe/London")
+        val dateStr = millisCandidate?.let {
+            java.text.SimpleDateFormat("dd-MM-yyyy", Locale.getDefault()).apply {
+                timeZone = tz
+            }.format(java.util.Date(it))
+        }
+        val timeStr = millisCandidate?.let {
+            java.text.SimpleDateFormat("HH:mm:ss", Locale.getDefault()).apply {
+                timeZone = tz
+            }.format(java.util.Date(it))
+        }
+
+        // 3. Environment info (keep only temp & RH)
+        val tempStr = profile.envTempC?.let {
+            "T ${String.format(Locale.US, "%.1f", it)}°C"
+        }
+        val rhStr = profile.envHumidity?.let {
+            "RH ${String.format(Locale.US, "%.0f", it)}%"
+        }
+
+        // 4. Join available fields
+        return listOfNotNull(timeStr, dateStr, tempStr, rhStr)
+            .filter { it.isNotBlank() }
+            .joinToString(" | ")
+    }
+
+
+
+    private fun buildCalibrationZip(profile: CalibrationProfile): File? = runCatching {
+        val cacheDir = File(requireContext().cacheDir, "shares").apply { mkdirs() }
+
+        val safeTitle = sanitizeName(displayNameFor(profile))
+
+        val zipFile = File(
+            cacheDir,
+            "calibration_${safeTitle}_${System.currentTimeMillis()}.zip"
+        )
+
+        ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
+            // NEW: folder name inside ZIP
+            // Example:
+            // [CALIBRATION]_Calibration_12345__Run_cal_20251028_1420
+            val folderName = buildString {
+                append("[CALIBRATION]_")
+                append(safeTitle)
+                append("__Run_")
+                append(sanitizeName(profile.runId))
+            }
+
+            // Parse image paths list from profile.imagePathsJson
+            val imagePaths = try {
+                val arr = org.json.JSONArray(profile.imagePathsJson ?: "[]")
+                List(arr.length()) { i -> arr.getString(i) }
+            } catch (e: Exception) {
+                emptyList<String>()
+            }
+
+            imagePaths
+                .map { path -> File(path) }
+                .filter { it.exists() }
+                .sortedBy { it.name.lowercase(Locale.ROOT) }
+                .forEachIndexed { idx, src ->
+                    val prettyName = buildCalibrationImageNameForShare(profile, idx, src)
+
+                    FileInputStream(src).use { fis ->
+                        zos.putNextEntry(ZipEntry("$folderName/$prettyName"))
+                        fis.copyTo(zos)
+                        zos.closeEntry()
+                    }
+                }
+        }
+
+        zipFile
+    }.getOrNull()
+
+
+    // Optionally smarter names if you stored wavelength/channel mapping in the profile
+    private fun buildCalibrationImageNameForShare(
+        profile: CalibrationProfile,
+        index: Int,
+        fileOnDisk: File
+    ): String {
+        // Try to include wavelength if we have it, else fall back to CAL_image_xx.png
+        // You can extend CalibrationProfile to hold per-channel wavelength info.
+        return "cal_channel_${String.format(Locale.US, "%02d", index)}.png"
+    }
 
 
 
@@ -949,34 +1316,48 @@ class GalleryFragment : Fragment() {
         s.replace(Regex("[^A-Za-z0-9_\\- ]"), "_").replace("\\s+".toRegex(), "_")
 
     private fun extractCalibrationMap(profile: CalibrationProfile): Map<Int, Double> {
-        val list = profile.ledNorms
+        val list = parseLedNormsJson(profile.ledNormsJson)
         return if (list.size == AMSI_WAVELENGTHS.size) {
             AMSI_WAVELENGTHS.indices.associate { i -> AMSI_WAVELENGTHS[i] to list[i] }
         } else emptyMap()
     }
 
-    private fun refreshDisplayNameForId(selId: Long) {
-        val index = adapter.currentList.indexOfFirst { item ->
-            when (item) {
-                is ResultListItem.SessionItem     -> item.session.id == selId
-                is ResultListItem.CalibrationItem -> 1_000_000_000_000L + item.profile.id == selId
-                is ResultListItem.InProgress      -> false
-            }
-        }
-        if (index >= 0) {
-            adapter.notifyItemChanged(index, ResultsAdapter.PAYLOAD_TITLE_CHANGED)
+    private fun parseLedNormsJson(json: String?): List<Double> {
+        if (json.isNullOrBlank()) return emptyList()
+        return try {
+            val arr = JSONArray(json)
+            List(arr.length()) { idx -> arr.optDouble(idx) }
+        } catch (e: Exception) {
+            emptyList()
         }
     }
+
+    private fun refreshDisplayNameForId(selId: Long) {
+        // sessions (unchanged)
+        val sessionIndex = adapter.currentList.indexOfFirst { item ->
+            item is ResultListItem.SessionItem && item.session.id == selId
+        }
+        if (sessionIndex >= 0) {
+            adapter.notifyItemChanged(sessionIndex, ResultsAdapter.PAYLOAD_TITLE_CHANGED)
+            return
+        }
+
+        // calibrations
+        val calibIndex = adapter.currentList.indexOfFirst { item ->
+            item is ResultListItem.CalibrationItem &&
+                    stableCalibId(item.profile) == selId
+        }
+        if (calibIndex >= 0) {
+            adapter.notifyItemChanged(calibIndex, ResultsAdapter.PAYLOAD_TITLE_CHANGED)
+        }
+    }
+
 
     private fun currentSessionById(id: Long): Session? =
         adapter.currentList.firstOrNull {
             it is ResultListItem.SessionItem && it.session.id == id
         }?.let { (it as ResultListItem.SessionItem).session }
 
-    private fun currentCalibrationById(id: Long): CalibrationProfile? =
-        adapter.currentList.firstOrNull {
-            it is ResultListItem.CalibrationItem && it.profile.id == id
-        }?.let { (it as ResultListItem.CalibrationItem).profile }
 
     private fun fileUri(file: File): Uri =
         FileProvider.getUriForFile(
@@ -995,4 +1376,5 @@ interface DisplayNameProvider {
     fun titleFor(session: Session): String
     fun subtitleFor(session: Session): String
     fun titleFor(cal: CalibrationProfile): String
+    fun subtitleFor(cal: CalibrationProfile): String
 }

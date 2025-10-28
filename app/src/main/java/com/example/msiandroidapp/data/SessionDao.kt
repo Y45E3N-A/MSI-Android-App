@@ -71,21 +71,45 @@ interface SessionDao {
     @Transaction
     suspend fun upsert(session: Session): Long {
         val key = session.runId?.takeIf { it.isNotBlank() }
-        return if (key == null) {
-            // No runId? Treat as brand new capture row.
+
+        // No runId? Always insert new row (can't merge reliably)
+        if (key == null) {
+            return insert(session)
+        }
+
+        val existing = findByRunId(key)
+        return if (existing == null) {
+            // First time we've seen this runId -> insert as-is.
             insert(session)
         } else {
-            val existing = findByRunId(key)
-            if (existing == null) {
-                // First time we've seen this runId -> insert.
-                insert(session)
-            } else {
-                // Row with this runId already exists -> update it in-place.
-                update(session.copy(id = existing.id))
-                existing.id
-            }
+            // Merge WITHOUT bumping original timestamps.
+            val merged = existing.copy(
+                // keep the original id and timestamps
+                createdAt = existing.createdAt.takeIf { it > 0 } ?: session.createdAt,
+                completedAtMillis = existing.completedAtMillis ?: session.completedAtMillis,
+
+                // keep the oldest human timestamp string if we already had one
+                timestamp = if (existing.timestamp.isNotBlank()) existing.timestamp else session.timestamp,
+
+                // update mutable/live fields
+                location = if (session.location.isNotBlank()) session.location else existing.location,
+                imagePaths = if (session.imagePaths.isNotEmpty()) session.imagePaths else existing.imagePaths,
+                type = session.type.ifBlank { existing.type },
+                label = session.label ?: existing.label,
+                runId = existing.runId ?: session.runId,
+                iniName = session.iniName ?: existing.iniName,
+                sectionIndex = session.sectionIndex ?: existing.sectionIndex,
+                envTempC = session.envTempC ?: existing.envTempC,
+                envHumidity = session.envHumidity ?: existing.envHumidity,
+                envTsUtc = session.envTsUtc ?: existing.envTsUtc
+            )
+
+            update(merged)
+            existing.id
         }
     }
+
+
 
     /**
      * Bulk helper: just loops upsert() for each element.

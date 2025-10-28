@@ -91,14 +91,24 @@ class ResultsAdapter(
         const val PAYLOAD_TITLE_CHANGED = "title_changed"
         private const val PAYLOAD_SELECTION = "selection_changed"
 
+        // helper to generate a stable synthetic Long ID for a calibration row
+        private fun calibStableIdFromRunId(runId: String): Long {
+            // hashCode() is Int; widen to Long and offset so we don't collide with session IDs
+            return runId.hashCode().toLong() + 1_000_000_000_000L
+        }
+
         val DiffCallback = object : DiffUtil.ItemCallback<ResultListItem>() {
             override fun areItemsTheSame(old: ResultListItem, new: ResultListItem): Boolean =
                 when {
                     old is ResultListItem.InProgress && new is ResultListItem.InProgress -> true
+
                     old is ResultListItem.SessionItem && new is ResultListItem.SessionItem ->
                         old.session.id == new.session.id
+
                     old is ResultListItem.CalibrationItem && new is ResultListItem.CalibrationItem ->
-                        old.profile.id == new.profile.id
+                        // 🔁 CHANGED: compare runId String instead of numeric runid
+                        old.profile.runId == new.profile.runId
+
                     else -> false
                 }
 
@@ -146,8 +156,13 @@ class ResultsAdapter(
 
     override fun getItemId(position: Int): Long = when (val item = getItem(position)) {
         is ResultListItem.InProgress -> Long.MIN_VALUE
+
         is ResultListItem.SessionItem -> item.session.id
-        is ResultListItem.CalibrationItem -> 1_000_000_000_000L + item.profile.id // separate ID space
+
+        is ResultListItem.CalibrationItem -> {
+            // 🔁 CHANGED: was 1_000_000_000_000L + item.profile.runid
+            calibStableIdFromRunId(item.profile.runId)
+        }
     }
 
     override fun onCreateViewHolder(parent: ViewGroup, viewType: Int): RecyclerView.ViewHolder {
@@ -315,7 +330,7 @@ class ResultsAdapter(
         ) {
             val cal = item.profile
             title.text = displayNameProvider.titleFor(cal)
-            subtitle.text = cal.summary ?: "Calibration saved"
+            subtitle.text = displayNameProvider.subtitleFor(cal)
 
             // --- consistent orange calibration badge ---
             badge.text = "CALIBRATION"

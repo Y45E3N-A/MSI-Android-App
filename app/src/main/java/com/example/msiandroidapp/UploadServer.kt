@@ -256,6 +256,36 @@ class UploadServer(
                 cleanupStaleSessions()
                 return ok("OK: saved ${destFile.name}")
             }
+            // ── 3.5) CALIBRATION PNG stream  ─────────────────────────────────────────────
+// Pi sends one PNG per LED channel with mode=cal, plus ?runId=cal_..., ?channel=idx
+// We save them under Sessions/CAL/<runId>/CAL_image_XX.png
+// and update/insert a CalibrationProfile row (or at least stash paths for it).
+            if (mode == "cal") {
+                val calRunId = params["runId"] ?: sessionId      // e.g. "cal_20251028...."
+                val channelIdx = params["channel"]?.toIntOrNull() ?: -1
+                val wavelengthNm = params["wavelength"] ?: ""
+
+                val safeName = fileNameHint.ifBlank {
+                    if (channelIdx >= 0) "CAL_image_%02d.png".format(channelIdx)
+                    else "CAL_image_${System.currentTimeMillis()}.png"
+                }
+
+                val savedPath = handleCalPng(
+                    calRunId = calRunId,
+                    filename = safeName,
+                    tmpFile = tmpFile,
+                    channelIdx = channelIdx,
+                    wavelengthNm = wavelengthNm
+                )
+
+                // Broadcast progress up to UI if you want (similar to UploadProgressBus)
+                // We'll just log for now:
+                Log.i(TAG, "CAL PNG saved: $savedPath (runId=$calRunId ch=$channelIdx λ=$wavelengthNm)")
+
+                cleanupStaleSessions()
+                return ok("CAL OK: $safeName")
+            }
+
 
             // ── 4) AMSI PNGs (default) ────────────────────────────────────────────────────────────
             // Compute where the image will be saved and log it (full, real path)
@@ -274,6 +304,90 @@ class UploadServer(
         } catch (e: Exception) {
             Log.e(TAG, "handlePost error: ${e.message}", e)
             newFixedLengthResponse(Response.Status.INTERNAL_ERROR, MIME_PLAINTEXT, "error: ${e.message}")
+        }
+    }
+    private fun handleCalPng(
+        calRunId: String,
+        filename: String,
+        tmpFile: File,
+        channelIdx: Int,
+        wavelengthNm: String
+    ): String {
+        // On-disk layout for calibration:
+        //   Sessions/CAL/<calRunId>/
+        //       CAL_image_00.png
+        //       CAL_image_01.png
+        //       ...
+        //
+        // We keep them all together so the Gallery/Calibration screen can show them.
+        val calRoot = File(sessionsRoot, "CAL").apply { mkdirs() }
+        val calDir  = File(calRoot, calRunId).apply { mkdirs() }
+
+        val target = File(calDir, filename)
+
+        try {
+            tmpFile.copyTo(target, overwrite = true)
+        } finally {
+            tmpFile.delete()
+        }
+
+        // Stash / merge this path into the DB for this calRunId.
+        // We'll upsert a CalibrationProfile row with partial info
+        // (images list grows as more channels arrive).
+        upsertCalibrationProfileImages(
+            calRunId = calRunId,
+            imagePath = target.absolutePath,
+            channelIdx = channelIdx,
+            wavelengthNm = wavelengthNm
+        )
+
+        return target.absolutePath
+    }
+    private fun upsertCalibrationProfileImages(
+        calRunId: String,
+        imagePath: String,
+        channelIdx: Int,
+        wavelengthNm: String
+    ) {
+        scope.launch {
+            try {
+                val db = AppDatabase.getDatabase(context)
+                val calDao = db.calibrationDao()
+
+                // We assume CalibrationProfile looks something like:
+                //  - runId: String (primary key or unique)
+                //  - timestampStr / completedAtMillis
+                //  - imagePaths: MutableList<String> or JSON string
+                //  - ledNormsJson: String? (we'll fill later when metadata arrives)
+                //  - notes like channel map, wavelengths, etc.
+                //
+                // We'll do a DAO call that either inserts new profile or adds this imagePath
+                // to the existing profile for that runId.
+                //
+                // If you don't yet have such a DAO method, create one like:
+                //   fun upsertCalibrationImage(runId: String,
+                //                               timestampMillis: Long,
+                //                               timestampStr: String,
+                //                               newImagePath: String,
+                //                               channelIdx: Int?,
+                //                               wavelengthNm: String?)
+                //
+                val nowMillis = System.currentTimeMillis()
+                val niceTs = SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.getDefault())
+                    .format(Date(nowMillis))
+
+                calDao.upsertCalibrationImage(
+                    runId = calRunId,
+                    timestampMillis = nowMillis,
+                    timestampStr = niceTs,
+                    newImagePath = imagePath,
+                    channelIdx = channelIdx,
+                    wavelengthNm = wavelengthNm
+                )
+
+            } catch (e: Exception) {
+                Log.e(TAG, "upsertCalibrationProfileImages failed for $calRunId", e)
+            }
         }
     }
 
@@ -333,6 +447,13 @@ class UploadServer(
             tmpFile.delete()
 
             val root = org.json.JSONObject(txt)
+            val modeFromJson = root.optString("mode").lowercase(Locale.ROOT)
+            val ledNormsArr = if (root.has("led_norms")) root.optJSONArray("led_norms") else null
+            val targetDn    = if (root.has("target_dn")) root.optDouble("target_dn") else Double.NaN
+
+            // We'll serialise led_norms back to a JSON string so we can persist it.
+            val ledNormsJsonStr = ledNormsArr?.toString() // e.g. "[0.5,0.48,...]"
+
             val sessionIdFromJson = root.optString("session_id").takeIf { it.isNotBlank() }
             val env = root.optJSONObject("env")
 
@@ -345,16 +466,40 @@ class UploadServer(
 
             // Try to update now; if no row yet, cache and apply on insert
             scope.launch {
+                // 1. Update env for normal sessions/PMFI (SessionDao)
                 val dao = AppDatabase.getDatabase(context).sessionDao()
-                val rows = runCatching { dao.updateEnvByRunId(runId, tempC, hum, tsUtc) }.getOrDefault(0)
+                val rows = runCatching { dao.updateEnvByRunId(runId, tempC, hum, tsUtc) }
+                    .getOrDefault(0)
 
                 if (rows == 0) {
+                    // not in sessions yet => stash for later AMSI/PMFI
                     pendingEnv[runId] = Triple(tempC, hum, tsUtc)
                     Log.i(TAG, "Env metadata cached for runId=$runId (session not inserted yet).")
                 } else {
                     Log.i(TAG, "Env metadata stored for runId=$runId (rows=$rows).")
                 }
+
+                // 2. If this was calibration metadata, also update CalibrationProfile
+                if (modeFromJson == "cal") {
+                    try {
+                        val calDao = AppDatabase.getDatabase(context).calibrationDao()
+                        calDao.upsertCalibrationMetadata(
+                            runId = runId,
+                            ledNormsJson = ledNormsJsonStr,
+                            envTempC = tempC,
+                            envHumidity = hum,
+                            envTsUtc = tsUtc,
+                            targetDn = if (targetDn.isNaN()) null else targetDn,
+                            // we can also store ts_utc from root["ts_utc"] if we want
+                            tsUtcOverall = root.optString("ts_utc")
+                        )
+                        Log.i(TAG, "Calibration metadata stored for runId=$runId")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Failed to store calibration metadata for $runId", e)
+                    }
+                }
             }
+
 
             ok("metadata accepted for $runId")
         } catch (e: Exception) {
