@@ -6,7 +6,6 @@ import android.graphics.Bitmap
 import android.graphics.Color
 import android.location.Location
 import android.os.Bundle
-import android.util.Base64
 import android.util.Log
 import android.view.LayoutInflater
 import android.view.View
@@ -47,6 +46,8 @@ import android.content.Intent
 import com.example.msiandroidapp.ui.pmfi.PmfiEditorActivity
 import android.os.Build
 import android.widget.ProgressBar
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 private const val TAG = "ControlFragment"
 
@@ -88,6 +89,7 @@ class ControlFragment : Fragment() {
     private var isConnecting = false
     private var isCaptureOngoing = false
     private var isPmfiRunning = false
+    private var isCalibratingOngoing = false
 
     // Track preview state mirrored from server
     private var previewActive = false
@@ -141,92 +143,119 @@ class ControlFragment : Fragment() {
 
 
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+
         // ----- Cache a few views for preview area -----
         previewContainer = view.findViewById(R.id.preview_container)
         previewScroll    = view.findViewById(R.id.preview_scrollview)
 
-        // ----- Initial UI + handlers -----
+        // ===== Initial UI wiring / click handlers =====
         setupButtons()
         observeUploadProgress()
-        hookSocketCore()
-        hookCalibrationSocket()
-        hookEnvSocket()
-        hookBatterySocket()
-        renderEnv(null, null, null)
-        // Start from a safe idle visual state
-        updateConnUi(null)
-        resetPmfiUi(hide = true)
-        setUiBusy(false)
 
-        // ----- Restore saved IP and connect if present -----
-        restoreSavedIp()
-        if (currentIp.isNotEmpty()) {
-            PiSocketManager.setBaseUrl(currentIp)
-            PiSocketManager.connect(::onPreviewImage, ::onStateUpdate)
-            PiSocketManager.emit("get_state", JSONObject())
-            pollBatteryOnce()
-        }
+        // ===== Socket listeners (core connection + env + battery + cal + amsi + pmfi) =====
+        hookSocketCore()      // "connect", "disconnect", "error" → updateConnUi(...)
+        hookEnvSocket()       // "env.update" → renderEnv(...)
+        hookBatterySocket()   // "battery.update" → renderBatteryFromJson(...)
 
-        // ----- Reset to start page + clear UI on connection loss -----
-        PiSocketManager.setConnectionStateListener { connected ->
-            if (!isAdded) return@setConnectionStateListener
+        // --- AMSI abort/error from Pi ---
+        PiSocketManager.on("amsi_error") { _payload ->
+            if (!isAdded) return@on
             requireActivity().runOnUiThread {
-                if (connected) {
-                    updateConnUi(true)
-                } else {
-                    // Model → idle, UI → fresh, navigate to Control tab
-                    vm.resetToIdle()
-                    resetUiToFreshState()
-                    (requireActivity() as? MainActivity)?.goToStartPage()
+                // kill AMSI UI and release busy lock
+                isCaptureOngoing = false
+                vm.isCapturing.value = false
 
-                }
+                binding.captureProgressBar.visibility = View.GONE
+                binding.captureProgressText.visibility = View.GONE
+
+                clearPreview() // dump any partial preview/grid
+                setUiBusy(false)
+                toast("Capture aborted")
             }
         }
 
-        // ----- Restore any in-flight AMSI capture UI -----
-        val restoredCount = vm.imageCount.value ?: 0
-        val restoredImgs  = vm.capturedBitmaps.value ?: List(16) { null }
-        if (restoredCount in 1..16 || restoredImgs.any { it != null }) {
-            startImageGrid()
-            updateGrid(restoredImgs)
-            binding.captureProgressBar.max = 16
-            binding.captureProgressBar.progress = restoredCount
-            binding.captureProgressText.text = "Receiving images: $restoredCount/16"
-            binding.captureProgressBar.visibility = View.VISIBLE
-            binding.captureProgressText.visibility = View.VISIBLE
-        }
+        // --- Calibration progress / complete / error from Pi ---
+        // We'll inline what used to be hookCalibrationSocket(), but with the fixed cleanup-on-error
+        PiSocketManager.on("cal_progress") { payload ->
+            val j = payload as? JSONObject ?: return@on
+            vm.updateCalibrationProgress(
+                channelIndex      = j.optInt("channel_index", 0),
+                totalChannels     = j.optInt("total_channels", 16),
+                wavelengthNm      = j.optInt("wavelength_nm", -1),
+                averageIntensity  = j.optDouble("average_intensity", -1.0),
+                normPrev          = j.optDouble("led_norm_prev", -1.0),
+                normNew           = j.optDouble("led_norm_new", -1.0),
+            )
+            if (!isAdded) return@on
+            requireActivity().runOnUiThread {
+                binding.calProgressBar.max = vm.calTotalChannels.value ?: 16
+                binding.calProgressBar.progress = (vm.calChannelIndex.value ?: 0) + 1
+                binding.calProgressBar.visibility = View.VISIBLE
+                binding.calProgressText.visibility = View.VISIBLE
 
-        // ----- LiveData: AMSI image grid + count -----
-        vm.capturedBitmaps.observe(viewLifecycleOwner) {
-            updateGrid(it ?: List(16) { null })
-        }
-        vm.imageCount.observe(viewLifecycleOwner) { c ->
-            binding.captureProgressBar.progress = c
-            binding.captureProgressText.text = "Receiving images: $c/16"
-            when {
-                c in 1..15 -> {
-                    binding.captureProgressBar.visibility = View.VISIBLE
-                    binding.captureProgressText.visibility = View.VISIBLE
-                }
-                c == 16 -> binding.captureProgressText.text = "All images received!"
-                else -> {
-                    binding.captureProgressBar.visibility = View.GONE
-                    binding.captureProgressText.visibility = View.GONE
-                }
+                val wl  = vm.calWavelengthNm.value
+                val ave = vm.calAverageIntensity.value
+                val p   = vm.calNormPrev.value
+                val n   = vm.calNormNew.value
+
+                binding.calProgressText.text =
+                    "Calibrating: ${binding.calProgressBar.progress}/${binding.calProgressBar.max} · " +
+                            "${wl ?: "-"}nm · avg=${ave?.let { String.format(Locale.US, "%.1f", it) } ?: "-"} · " +
+                            "norm ${p?.let { String.format(Locale.US, "%.2f", it) } ?: "-"}→" +
+                            "${n?.let { String.format(Locale.US, "%.2f", it) } ?: "-"}"
             }
         }
 
-        // ================================
-        // PMFI SOCKET EVENT BINDINGS
-        // ================================
-        // Plan (now includes section_count)
-        // Plan (now includes section_count)
+        PiSocketManager.on("cal_complete") { payload ->
+            val j = payload as? JSONObject
+            val norms = j?.optJSONArray("led_norms")
+            if (norms != null && norms.length() == 16) {
+                val prefs = requireActivity()
+                    .getSharedPreferences("APP_SETTINGS", Context.MODE_PRIVATE)
+                prefs.edit()
+                    .putString("led_norms_json", norms.toString())
+                    .apply()
+            }
+            if (!isAdded) return@on
+            requireActivity().runOnUiThread {
+                toast("Calibration complete")
+                vm.completeCalibration(emptyList())
+                showCalUi(false)
+
+                // fully idle now
+                isCaptureOngoing = false
+                isCalibratingOngoing = false
+                isPmfiRunning = false
+                vm.isCapturing.value = false
+                setUiBusy(false)
+            }
+        }
+
+        PiSocketManager.on("cal_error") { _payload ->
+            if (!isAdded) return@on
+            requireActivity().runOnUiThread {
+                // mark calibration as failed and free UI
+                vm.failCalibration()
+                showCalUi(false)
+
+                isCaptureOngoing = false
+                isPmfiRunning = false
+                vm.isCapturing.value = false
+                isCalibratingOngoing = false
+
+                setUiBusy(false)
+                toast("Calibration aborted")
+            }
+        }
+
+        // --- PMFI SOCKET EVENT BINDINGS ---
         PiSocketManager.on("pmfi.plan") { payload ->
-            val j = payload as org.json.JSONObject
+            val j = payload as JSONObject
             val totalFrames  = j.optInt("total_frames", 0)
             val sectionCount = j.optInt("section_count", 0)
 
-            // Model
+            // model reset
             vm.pmfiTotalFrames.postValue(totalFrames)
             vm.pmfiDoneFrames.postValue(0)
             vm.pmfiPercent.postValue(0)
@@ -240,7 +269,7 @@ class ControlFragment : Fragment() {
             vm.pmfiSectionState.postValue(null)
             vm.pmfiComplete.postValue(false)
 
-            // Reset cumulative/rollover guards for a brand-new run
+            // rollover guards
             pmfiCumOffset = 0
             pmfiLastTot   = 0
             lastSectionIndexForTot = -1
@@ -248,7 +277,7 @@ class ControlFragment : Fragment() {
 
             if (!isAdded) return@on
             requireActivity().runOnUiThread {
-                // Hide any AMSI UI remnants
+                // hide any AMSI remnants
                 binding.captureProgressBar.progress = 0
                 binding.captureProgressBar.visibility = View.GONE
                 binding.captureProgressText.text = ""
@@ -257,6 +286,7 @@ class ControlFragment : Fragment() {
                 vm.isCapturing.value = false
                 vm.imageCount.value = 0
 
+                // show PMFI UI
                 resetPmfiUi(hide = false)
                 isPmfiRunning = true
                 setUiBusy(true)
@@ -266,18 +296,14 @@ class ControlFragment : Fragment() {
             }
         }
 
-
-        // Stage (capturing/packing/uploaded…)
         PiSocketManager.on("pmfi.stage") { payload ->
-            val j = payload as org.json.JSONObject
+            val j = payload as JSONObject
             vm.pmfiCurrentSection.postValue(j.optString("section", null))
             vm.pmfiSectionState.postValue(j.optString("state", ""))
         }
 
-        // Progress (overall + per-section)
-        // Progress (overall + per-section, with safe cumulative logic)
         PiSocketManager.on("pmfi.progress") { payload ->
-            val j = payload as org.json.JSONObject
+            val j = payload as JSONObject
 
             val secIdx0  = j.optInt("section_index", 0)
             val secDone  = j.optInt("section_done", j.optInt("frame_idx", 0))
@@ -285,13 +311,11 @@ class ControlFragment : Fragment() {
             val rawTot   = j.optInt("total_done", 0)
             val totAll   = j.optInt("total_frames", 0)
 
-            // Determine a real boundary: new section OR a clean zip boundary (secDone==0 and previous zip finished)
             val hasValidSecTotal = secTotal > 0
             val finishedPrevZip  = hasValidSecTotal && lastSecDoneForTot >= (secTotal - 1)
             val startedNewZipOrSection =
                 (secIdx0 > lastSectionIndexForTot) || (secDone == 0 && finishedPrevZip)
 
-            // Only compensate rollover if we genuinely crossed a boundary
             if (rawTot < pmfiLastTot && startedNewZipOrSection) {
                 pmfiCumOffset += pmfiLastTot
             }
@@ -303,8 +327,10 @@ class ControlFragment : Fragment() {
             val safeRawTot = rawTot.coerceAtLeast(0)
             val totDoneCumulative = (safeRawTot + pmfiCumOffset).coerceAtMost(safeTotAll)
 
-            val secPct = if (secTotal > 0) ((secDone.toDouble() / secTotal) * 100).toInt() else 0
-            val totPct = if (safeTotAll > 0) ((totDoneCumulative.toDouble() / safeTotAll) * 100).toInt() else 0
+            val secPct = if (secTotal > 0)
+                ((secDone.toDouble() / secTotal) * 100).toInt() else 0
+            val totPct = if (safeTotAll > 0)
+                ((totDoneCumulative.toDouble() / safeTotAll) * 100).toInt() else 0
 
             vm.pmfiCurrentSection.postValue(j.optString("section", null))
             vm.pmfiSectionIndex.postValue(secIdx0)
@@ -313,36 +339,39 @@ class ControlFragment : Fragment() {
             vm.pmfiSectionPercent.postValue(secPct)
             vm.pmfiSectionInfo.postValue(j.optString("section_info", null))
 
-            // Post the cumulative values, not the raw
             vm.pmfiDoneFrames.postValue(totDoneCumulative)
             vm.pmfiTotalFrames.postValue(safeTotAll)
             vm.pmfiPercent.postValue(totPct)
         }
 
-
-
-        // Section uploaded (toast)
         PiSocketManager.on("pmfi.sectionUploaded") { payload ->
-            val j = payload as org.json.JSONObject
+            val j = payload as JSONObject
             val section = j.optString("section", "")
             val bytes   = j.optLong("bytes", -1L)
             if (!isAdded) return@on
             requireActivity().runOnUiThread {
-                val human = if (bytes > 0) String.format(Locale.getDefault(), "%.1f MB", bytes / (1024f * 1024f)) else "uploaded"
+                val human = if (bytes > 0) {
+                    String.format(
+                        Locale.getDefault(),
+                        "%.1f MB",
+                        bytes / (1024f * 1024f)
+                    )
+                } else {
+                    "uploaded"
+                }
                 Toast.makeText(requireContext(), "$section $human", Toast.LENGTH_SHORT).show()
             }
         }
 
-        // Optional log
         PiSocketManager.on("pmfi.log") { payload ->
-            vm.pmfiLogLine.postValue((payload as org.json.JSONObject).optString("line"))
+            vm.pmfiLogLine.postValue((payload as JSONObject).optString("line"))
         }
 
-        // Complete
         PiSocketManager.on("pmfi.complete") { payload ->
-            val ok = (payload as org.json.JSONObject).optBoolean("ok", true)
+            val ok = (payload as JSONObject).optBoolean("ok", true)
             vm.pmfiComplete.postValue(ok)
             vm.pmfiPercent.postValue(100)
+
             if (!isAdded) return@on
             requireActivity().runOnUiThread {
                 pmfiCumOffset = 0
@@ -354,15 +383,82 @@ class ControlFragment : Fragment() {
             }
         }
 
-        // ================================
-        // PMFI LiveData → UI
-        // ================================
-        // Current section label
-        vm.pmfiCurrentSection.observe(viewLifecycleOwner) { s ->
-            binding.pmfiSectionLabel.text = s?.let { "Current section: $it" } ?: "PMFI idle"
+        // ===== Initial render / idle defaults =====
+        renderEnv(null, null, null)
+        updateConnUi(null)              // grey dot, "Status: Unknown"
+        resetPmfiUi(hide = true)
+        setUiBusy(false)
+
+        // ===== Restore saved IP, connect if known, ask for initial state/battery =====
+        restoreSavedIp()
+        if (currentIp.isNotEmpty()) {
+            PiSocketManager.setBaseUrl(currentIp)
+            PiSocketManager.connect(::onPreviewImage, ::onStateUpdate)
+            PiSocketManager.emit("get_state", JSONObject())
+            pollBatteryOnce()
         }
 
-// Overall percent (non-animated)
+        // ===== connection-state listener (socket layer high-level up/down) =====
+        PiSocketManager.setConnectionStateListener { connected ->
+            if (!isAdded) return@setConnectionStateListener
+            requireActivity().runOnUiThread {
+                if (connected) {
+                    updateConnUi(true)
+                } else {
+                    // model → idle
+                    vm.resetToIdle()
+
+                    // UI → fresh, navigate to start tab
+                    resetUiToFreshState()
+                    (requireActivity() as? MainActivity)?.goToStartPage()
+                }
+            }
+        }
+
+        // ===== Restore any in-flight AMSI capture UI from ViewModel (rotation, etc.) =====
+        val restoredCount = vm.imageCount.value ?: 0
+        val restoredImgs  = vm.capturedBitmaps.value ?: List(16) { null }
+        if (restoredCount in 1..16 || restoredImgs.any { it != null }) {
+            startImageGrid()
+            updateGrid(restoredImgs)
+            binding.captureProgressBar.max = 16
+            binding.captureProgressBar.progress = restoredCount
+            binding.captureProgressText.text = "Receiving images: $restoredCount/16"
+            binding.captureProgressBar.visibility = View.VISIBLE
+            binding.captureProgressText.visibility = View.VISIBLE
+        }
+
+        // ===== LiveData observers → keep UI reactive =====
+        vm.capturedBitmaps.observe(viewLifecycleOwner) {
+            updateGrid(it ?: List(16) { null })
+        }
+
+        vm.imageCount.observe(viewLifecycleOwner) { c ->
+            binding.captureProgressBar.progress = c
+            binding.captureProgressText.text = "Receiving images: $c/16"
+            when {
+                c in 1..15 -> {
+                    binding.captureProgressBar.visibility = View.VISIBLE
+                    binding.captureProgressText.visibility = View.VISIBLE
+                }
+                c == 16 -> {
+                    binding.captureProgressText.text = "All images received!"
+                }
+                else -> {
+                    binding.captureProgressBar.visibility = View.GONE
+                    binding.captureProgressText.visibility = View.GONE
+                }
+            }
+        }
+
+        // ===== PMFI LiveData → UI =====
+        // current section
+        vm.pmfiCurrentSection.observe(viewLifecycleOwner) { s ->
+            binding.pmfiSectionLabel.text =
+                s?.let { "Current section: $it" } ?: "PMFI idle"
+        }
+
+        // overall %
         vm.pmfiPercent.observe(viewLifecycleOwner) { p ->
             val v = p ?: 0
             binding.pmfiProgressBar.setProgressFast(v)
@@ -371,33 +467,30 @@ class ControlFragment : Fragment() {
             }
         }
 
-// Overall counter text
+        // overall counter text
         vm.pmfiDoneFrames.observe(viewLifecycleOwner) { done ->
             val total = vm.pmfiTotalFrames.value ?: 0
-            val d = done ?: 0
-            val pct = if (total > 0) (d * 100 / total) else 0
+            val d     = done ?: 0
+            val pct   = if (total > 0) (d * 100 / total) else 0
             binding.pmfiCounter.text = "$d / $total (${pct}%)"
         }
 
-// Stage
+        // per-section stage/state
         vm.pmfiSectionState.observe(viewLifecycleOwner) { st ->
             binding.pmfiStageLabel.text = st ?: ""
         }
-
-// Per-section info + progress (non-animated)
         vm.pmfiSectionInfo.observe(viewLifecycleOwner) { info ->
             binding.tvSectionInfo?.text = info ?: "—"
         }
 
-// Instant reset when section index increases (eliminates "carry-over" lag)
         var lastSectionIndex = -1
         vm.pmfiSectionIndex.observe(viewLifecycleOwner) { idx0 ->
-            val idx = idx0 ?: 0
+            val idx   = idx0 ?: 0
             val count = vm.pmfiSectionCount.value ?: 0
             binding.tvSectionsCount?.text = "Sections: ${idx + 1}/$count"
 
             if (idx != lastSectionIndex) {
-                // New section → zero the bar & text immediately
+                // new section → zero local per-zip bar immediately
                 binding.pbSection?.setProgressFast(0)
                 binding.tvSectionFrames?.text = "0/0 (0%) in this zip"
                 lastSectionIndex = idx
@@ -406,21 +499,20 @@ class ControlFragment : Fragment() {
 
         vm.pmfiSectionDone.observe(viewLifecycleOwner) { done ->
             val total = vm.pmfiSectionTotal.value ?: 0
-            val d = done ?: 0
-            val pct = if (total > 0) (d * 100 / total) else 0
+            val d     = done ?: 0
+            val pct   = if (total > 0) (d * 100 / total) else 0
             binding.pbSection?.max = 100
             binding.pbSection?.setProgressFast(pct)
             binding.tvSectionFrames?.text = "$d/$total (${pct}%) in this zip"
         }
 
-// Completion → immediate reset to idle visuals
         vm.pmfiComplete.observe(viewLifecycleOwner) { ok ->
             if (ok == true) {
                 binding.pmfiStageLabel.text = "Complete"
-                // Snap to 100, then fast reset a moment later
                 binding.pmfiProgressBar.setProgressFast(100)
+
                 viewLifecycleOwner.lifecycleScope.launch {
-                    delay(300) // tiny grace so user sees 100%
+                    delay(300)
                     if (!isAdded) return@launch
                     isPmfiRunning = false
                     setUiBusy(false)
@@ -431,6 +523,7 @@ class ControlFragment : Fragment() {
             }
         }
     }
+
     private fun ProgressBar.setProgressFast(value: Int) {
         if (Build.VERSION.SDK_INT >= 24) this.setProgress(value, /*animate=*/false)
         else this.progress = value
@@ -459,16 +552,34 @@ class ControlFragment : Fragment() {
         // Ensure visible text right away
         if (binding.pmfiStageLabel.text.isNullOrBlank()) binding.pmfiStageLabel.text = "Starting…"
     }
+    // Returns true if the instrument should be treated as BUSY (user must not start anything else)
+    private fun isGlobalBusy(): Boolean {
+        return isCaptureOngoing ||
+                isPmfiRunning   ||
+                isCalibratingOngoing ||
+                (vm.isCalibrating.value == true)
+    }
+
 
     private fun resetUiToFreshState() {
         // Connection strip
         binding.piConnectionStatus.text = "Status: Unknown"
         binding.piConnectionDot.setBackgroundResource(R.drawable.circle_grey)
+
+        // ---- Clear battery chip ----
         binding.chipBattery.text = "— %"
         binding.chipBattery.setChipIconResource(R.drawable.ic_battery_unknown_24)
 
+        // ---- Clear env chips ----
+        binding.topTempChip.text = "Temp: —"
+        binding.topHumChip.text  = "RH: —"
+
+        // Keep legacy hidden labels in sync too (just so nothing downstream explodes)
+        binding.envTempText.text     = "Temp: —"
+        binding.envHumidityText.text = "RH: —"
+
         // Last button & switches
-        binding.lastPiButtonText.text = "MFI Button Pressed: --"
+        binding.lastPiButtonText.text = "MFi Button Pressed: --"
         binding.switchCameraPreview.isChecked = false
         binding.switchCameraPreview.isEnabled = false
 
@@ -512,6 +623,7 @@ class ControlFragment : Fragment() {
         binding.buttonCalibrate.isEnabled = false
         binding.buttonShutdown.isEnabled = false
     }
+
     private val pmfiEditorLauncher = registerForActivityResult(
         ActivityResultContracts.StartActivityForResult()
     ) { res ->
@@ -557,10 +669,6 @@ class ControlFragment : Fragment() {
             delay(40)
         }
     }
-
-    // ===== small helpers for PMFI UI text =====
-    private fun fmtPair(a: Int?, b: Int?): String =
-        if (a != null && b != null) "$a/$b" else "0/0"
 
     // ===== UI setup =====
     private fun setupButtons() {
@@ -617,72 +725,131 @@ class ControlFragment : Fragment() {
 
 
         // Preview toggle (SW4)
-        binding.switchCameraPreview.setOnCheckedChangeListener { _, checked ->
-            if (!isPiConnected || isCaptureOngoing || isPmfiRunning || vm.isCalibrating.value == true) {
-                binding.switchCameraPreview.isChecked = false
-                return@setOnCheckedChangeListener
-            }
-            triggerButton("SW4")
-            if (checked) startLivePreview() else clearPreview()
-        }
+        // Preview toggle (SW4)
+        attachPreviewToggleListener()
+
 
         // AMSI (SW2) — with preview-off await
         binding.buttonStartAmsi.setOnClickListener {
-            if (!isPiConnected || isCaptureOngoing || isPmfiRunning || vm.isCalibrating.value == true) {
-                toast("Pi not connected or busy"); return@setOnClickListener
+            // Step 0: if Pi not connected, just toast and leave everything as-is
+            if (!isPiConnected) {
+                toast("Pi not connected")
+                return@setOnClickListener
             }
 
-            // 1) Prepare UI immediately so the grid is visible even while we wait
+            // Step 1: try to grab the global busy lock *atomically*
+            val gotLock = tryBeginBusy("amsi")
+            if (!gotLock) {
+                // someone else is already running, so just reflect that in UI
+                toast("Busy")
+                return@setOnClickListener
+            }
+
+            // Step 2: we own the lock now. Immediately reflect capture state in ViewModel/UI.
+            vm.isCapturing.value = true
             startImageGrid()
             startCaptureUi()
-            isCaptureOngoing = true
-            setUiBusy(true)
             vm.capturedBitmaps.value = MutableList(16) { null }
             vm.imageCount.value = 0
-            vm.isCapturing.value = true
-            // Kill any lingering live preview image in the container
             clearLiveOnly()
 
-            // 2) Ensure the preview is actually OFF on the Pi before we start AMSI
+            // Also hard-disable the AMSI button itself to nuke tap spam visuals.
+            binding.buttonStartAmsi.isEnabled = false
+            binding.buttonStartAmsi.alpha = 0.4f
+
+            // Step 3: launch the actual start sequence async
             viewLifecycleOwner.lifecycleScope.launch {
                 try {
-                    // Ask Pi for a fresh state, then stop preview and await ack
                     PiSocketManager.emit("get_state", JSONObject())
                     stopPreviewAndAwaitAck(timeoutMs = 2500)
-
-                    // 3) Now it's safe to start AMSI (camera_lock will be free on the Pi)
                     triggerButton("SW2")
+                    // success path: stay busy. We do NOT undo the lock here.
                 } catch (e: Exception) {
                     toast("Failed to start capture: ${e.localizedMessage}")
-                    // Roll back the UI if something went wrong
+
+                    // rollback the lock because nothing actually started
                     isCaptureOngoing = false
+                    vm.isCapturing.value = false
                     setUiBusy(false)
+
+                    // give button back so user can retry
+                    binding.buttonStartAmsi.isEnabled = true
+                    binding.buttonStartAmsi.alpha = 1f
                 }
             }
         }
 
 
+
+
+
         // Calibration (SW3)
         binding.buttonCalibrate.setOnClickListener {
-            if (!isPiConnected || isCaptureOngoing || isPmfiRunning || vm.isCalibrating.value == true) {
-                toast("Busy or not connected"); return@setOnClickListener
+            if (!isPiConnected) {
+                toast("Not connected")
+                return@setOnClickListener
             }
-            triggerButton("SW3")
+
+            val gotLock = tryBeginBusy("cal")
+            if (!gotLock) {
+                toast("Busy")
+                return@setOnClickListener
+            }
+
+            // reflect calibration UI instantly
             vm.startCalibration(totalChannels = 16)
             showCalUi(true)
-            setUiBusy(true)
+
+            // disable the Cal button to kill visual spam
+            binding.buttonCalibrate.isEnabled = false
+            binding.buttonCalibrate.alpha = 0.4f
+
+            // tell the Pi
+            triggerButton("SW3")
+            // cleanup happens later in cal_complete / cal_error, where you already:
+            //  - set isCalibratingOngoing=false
+            //  - setUiBusy(false)
         }
+
+
+
 
         // PMFI start (INI text → base64 → Pi)
         binding.pmfiStartBtn.setOnClickListener {
-            if (!isPiConnected || isCaptureOngoing || vm.isCalibrating.value == true) {
-                toast("Busy or not connected"); return@setOnClickListener
+            if (!isPiConnected) {
+                toast("Not connected")
+                return@setOnClickListener
             }
+
             val iniText = binding.pmfiIniEdit.text?.toString()?.trim().orEmpty()
-            if (iniText.isBlank()) { toast("Paste an INI first"); return@setOnClickListener }
-            if (binding.switchCameraPreview.isChecked) triggerButton("SW4")
+            if (iniText.isBlank()) {
+                toast("Paste an INI first")
+                return@setOnClickListener
+            }
+
+            val gotLock = tryBeginBusy("pmfi")
+            if (!gotLock) {
+                toast("Busy")
+                return@setOnClickListener
+            }
+
+            // disable button immediately to kill spam visuals
+            binding.pmfiStartBtn.isEnabled = false
+            binding.pmfiStartBtn.isClickable = false
+            binding.pmfiStartBtn.alpha = 0.4f
+            binding.pmfiStartBtn.text = "PMFI running…"
+
+            // if preview was on, tell Pi to stop it
+            if (binding.switchCameraPreview.isChecked) {
+                triggerButton("SW4")
+            }
+
+            // Actually start PMFI
             startPmfi(iniText)
         }
+
+
+
 
         // Shutdown
         binding.buttonShutdown.setOnClickListener {
@@ -701,37 +868,114 @@ class ControlFragment : Fragment() {
         binding.captureProgressBar.visibility = View.GONE
         binding.captureProgressText.visibility = View.GONE
     }
+    private fun attachPreviewToggleListener() {
+        binding.switchCameraPreview.setOnCheckedChangeListener { _, checked ->
+            // Block if busy or disconnected
+            if (isGlobalBusy() || !isPiConnected) {
+                // snap UI back to real state without recursively calling ourselves forever
+                binding.switchCameraPreview.setOnCheckedChangeListener(null)
+                binding.switchCameraPreview.isChecked = previewActive
+                attachPreviewToggleListener()
+                return@setOnCheckedChangeListener
+            }
+
+            // Safe to toggle preview on the Pi
+            triggerButton("SW4")
+            if (checked) {
+                startLivePreview()
+            } else {
+                clearPreview()
+            }
+        }
+    }
 
     private fun observeUploadProgress() {
         UploadProgressBus.uploadProgress.observe(viewLifecycleOwner) { (sessionId, count) ->
-            // Ignore upload progress while PMFI or calibration is active,
-            // or if we're not in an AMSI capture UI state.
+            // Ignore AMSI UI updates if we're not actually in an AMSI capture state
+            // (or if PMFI / calibration is taking over the UI).
             if (isPmfiRunning || (vm.isCalibrating.value == true) || !isCaptureOngoing) return@observe
 
             Log.d(TAG, "Upload progress $sessionId : $count")
+
             vm.imageCount.value = count
             binding.captureProgressBar.progress = count
             binding.captureProgressText.text = "Receiving images: $count/16"
 
-            if (count == 16) {
-                vm.isCapturing.value = false
-                binding.captureProgressText.text = "All images received!"
-                viewLifecycleOwner.lifecycleScope.launch {
-                    delay(1500)
-                    if (!isAdded) return@launch
+            when {
+                count in 1..15 -> {
+                    // mid-transfer
+                    vm.isCapturing.value = true
+                    binding.captureProgressBar.visibility = View.VISIBLE
+                    binding.captureProgressText.visibility = View.VISIBLE
+                }
+
+                count == 16 -> {
+                    // finished AMSI capture (all 16 PNGs uploaded)
+                    vm.isCapturing.value = false
+                    binding.captureProgressText.text = "All images received!"
+
+                    // --- NEW BIT: compute total MB of this run and toast it ---
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        val humanSize: String? = withContext(Dispatchers.IO) {
+                            try {
+                                val db  = com.example.msiandroidapp.data.AppDatabase.getDatabase(requireContext())
+                                val dao = db.sessionDao()
+
+                                // This uses the new suspend fun getMostRecentSession()
+                                val latest: com.example.msiandroidapp.data.Session? =
+                                    dao.getMostRecentSession()
+
+                                if (latest != null) {
+                                    // Sum the actual files we know about in imagePaths
+                                    val totalBytes = latest.imagePaths.sumOf { pathStr ->
+                                        try {
+                                            val f = java.io.File(pathStr)
+                                            if (f.exists() && f.isFile) f.length() else 0L
+                                        } catch (_: Exception) {
+                                            0L
+                                        }
+                                    }
+
+                                    val mb = totalBytes / (1024.0 * 1024.0)
+                                    String.format(Locale.getDefault(), "%.1f MB", mb)
+                                } else {
+                                    null
+                                }
+                            } catch (e: Exception) {
+                                Log.w(TAG, "Could not calc AMSI size", e)
+                                null
+                            }
+                        }
+
+                        if (isAdded && humanSize != null) {
+                            Toast.makeText(
+                                requireContext(),
+                                "AMSI saved $humanSize",
+                                Toast.LENGTH_SHORT
+                            ).show()
+                        }
+
+                        // After a short delay, do the same cleanup you already had
+                        delay(1500)
+                        if (!isAdded) return@launch
+                        binding.captureProgressBar.visibility = View.GONE
+                        binding.captureProgressText.visibility = View.GONE
+                        clearPreview()
+                        isCaptureOngoing = false
+                        setUiBusy(false)
+                    }
+                }
+
+                else -> {
+                    // 0 or weird (safety fallback)
                     binding.captureProgressBar.visibility = View.GONE
                     binding.captureProgressText.visibility = View.GONE
-                    clearPreview()
-                    isCaptureOngoing = false
-                    setUiBusy(false)
                 }
-            } else if (count in 1..15) {
-                vm.isCapturing.value = true
-                binding.captureProgressBar.visibility = View.VISIBLE
-                binding.captureProgressText.visibility = View.VISIBLE
             }
         }
     }
+
+
 
 
     // ===== Await helper: wait for preview to drop =====
@@ -950,27 +1194,43 @@ class ControlFragment : Fragment() {
     }
 
     private fun forceDisconnect() {
-        stopPolling()
-        cancelPendingDisconnect()
-        try { PiSocketManager.disconnect() } catch (_: Exception) {}
+        viewLifecycleOwner.lifecycleScope.launch {
+            // Step 1: ask Pi to hard-abort any running job (AMSI, CAL, PMFI, preview, LEDs...)
+            // Safe to ignore failures: we're going to drop the socket no matter what.
+            val ip = currentIp
+            if (ip.isNotEmpty()) {
+                try {
+                    // You add this to PiApi: POST /abort?reason=user%20disconnect
+                    val resp = PiApi.api.abortAll("user disconnect")
+                    // we don't actually need to inspect resp here
+                } catch (_: Exception) {
+                    // swallow; maybe we're already offline
+                }
+            }
 
-        // Local flags
-        isPiConnected = false
-        isConnecting = false
-        isCaptureOngoing = false
-        isPmfiRunning = false
-        previewActive = false
+            // Step 2: local teardown
+            stopPolling()
+            cancelPendingDisconnect()
+            try { PiSocketManager.disconnect() } catch (_: Exception) {}
 
-        // Model → idle
-        vm.resetToIdle()
+            // clear local flags so UI unlocks immediately
+            isPiConnected = false
+            isConnecting = false
+            isCaptureOngoing = false
+            isPmfiRunning = false
+            previewActive = false
+            vm.resetToIdle()
 
-        // UI → fresh start
-        resetUiToFreshState()
-        resetPmfiUi(hide = true)
-        // Navigate to the start page/tab
-        (activity as? com.example.msiandroidapp.MainActivity)?.goToStartPage()
+            // reset all visible UI surfaces to "fresh"
+            resetUiToFreshState()
+            resetPmfiUi(hide = true)
+            setUiBusy(false)
 
-        toast("Disconnected from Pi")
+            // jump user back to start tab
+            (activity as? MainActivity)?.goToStartPage()
+
+            toast("Disconnected from Pi")
+        }
     }
 
 
@@ -994,8 +1254,11 @@ class ControlFragment : Fragment() {
         } else if (connected == false) {
             isPiConnected = false
         }
-        val busy = isCaptureOngoing || isPmfiRunning || (vm.isCalibrating.value == true)
+
+// use the single source of truth
+        val busy = isGlobalBusy()
         setUiBusy(busy && isPiConnected)
+
     }
 
     // ===== Socket handlers (core + calibration) =====
@@ -1069,70 +1332,17 @@ class ControlFragment : Fragment() {
 
     // Pretty-print on the Control tab
     private fun renderEnv(tempC: Double?, rh: Double?, iso: String?) {
-        val tLbl = if (tempC == null) "Temp: —" else String.format(Locale.UK, "Temp: %.1f °C", tempC)
+        val tLbl = if (tempC == null) "Temp: —" else String.format(Locale.UK, "Temp: %.1f \u00B0C", tempC)
         val hLbl = if (rh == null)    "RH: —"   else String.format(Locale.UK, "RH: %.0f %%", rh)
 
-        // New visible chips
         binding.topTempChip.text = tLbl
         binding.topHumChip.text  = hLbl
 
-        // Legacy labels (hidden, but harmless to keep in sync)
+        // keep hidden legacy labels in sync
         binding.envTempText.text     = tLbl
         binding.envHumidityText.text = hLbl
     }
 
-
-    private fun hookCalibrationSocket() {
-        PiSocketManager.on("cal_progress") { payload ->
-            val j = payload as? JSONObject ?: return@on
-            vm.updateCalibrationProgress(
-                channelIndex = j.optInt("channel_index", 0),
-                totalChannels = j.optInt("total_channels", 16),
-                wavelengthNm = j.optInt("wavelength_nm", -1),
-                averageIntensity = j.optDouble("average_intensity", -1.0),
-                normPrev = j.optDouble("led_norm_prev", -1.0),
-                normNew = j.optDouble("led_norm_new", -1.0),
-            )
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
-                binding.calProgressBar.max = vm.calTotalChannels.value ?: 16
-                binding.calProgressBar.progress = (vm.calChannelIndex.value ?: 0) + 1
-                binding.calProgressBar.visibility = View.VISIBLE
-                binding.calProgressText.visibility = View.VISIBLE
-                val wl = vm.calWavelengthNm.value
-                val ave = vm.calAverageIntensity.value
-                val p = vm.calNormPrev.value
-                val n = vm.calNormNew.value
-                binding.calProgressText.text =
-                    "Calibrating: ${binding.calProgressBar.progress}/${binding.calProgressBar.max} · ${wl ?: "-"}nm · avg=${ave?.let { String.format(Locale.US, "%.1f", it) } ?: "-"} · norm ${p?.let { String.format(Locale.US, "%.2f", it) } ?: "-"}→${n?.let { String.format(Locale.US, "%.2f", it) } ?: "-"}"
-            }
-        }
-        PiSocketManager.on("cal_complete") { payload ->
-            val j = payload as? JSONObject
-            val norms = j?.optJSONArray("led_norms")
-            if (norms != null && norms.length() == 16) {
-                val prefs = requireActivity().getSharedPreferences("APP_SETTINGS", Context.MODE_PRIVATE)
-                prefs.edit().putString("led_norms_json", norms.toString()).apply()
-            }
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
-                toast("Calibration complete")
-                vm.completeCalibration(emptyList())
-                showCalUi(false)
-                setUiBusy(false)
-            }
-        }
-        PiSocketManager.on("cal_error") { payload ->
-            val msg = (payload as? JSONObject)?.optString("message") ?: payload.toString()
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
-                toast("Calibration error: $msg")
-                vm.failCalibration()
-                showCalUi(false)
-                setUiBusy(false)
-            }
-        }
-    }
 
     // ===== Preview / state callbacks =====
     private fun onPreviewImage(data: JSONObject, bmp: Bitmap) {
@@ -1160,74 +1370,102 @@ class ControlFragment : Fragment() {
     }
 
     private fun onStateUpdate(data: JSONObject) {
-        // Parse server state
-        val sw4          = data.optBoolean("sw4", false)               // server-side preview flag
-        val busy         = data.optBoolean("busy", false)
+        val sw4          = data.optBoolean("sw4", false)
+        val busyNow      = data.optBoolean("busy", false)
         val calibrating  = data.optBoolean("calibrating", false)
-        val pmfi         = data.optBoolean("pmfi_running", false)
+        val pmfiNow      = data.optBoolean("pmfi_running", false)
         val lastBtn      = data.optString("last_button", "")
-        // Optional extras (won't crash if absent)
-        val pmfiStage    = data.optString("pmfi_stage", "")
-        val pmfiSection  = data.optString("pmfi_section", "")
-
-        // Mirror preview state bit for wait helpers
-        previewActive = sw4
 
         if (!isAdded) return
         requireActivity().runOnUiThread {
-            // We're receiving a socket event -> mark as connected
             updateConnUi(true)
 
-            // ---- Update lightweight labels ----
             if (lastBtn.isNotBlank()) {
                 binding.lastPiButtonText.text = "MFI Button Pressed: $lastBtn"
             }
+
+            // reflect stage labels if provided
+            val pmfiStage    = data.optString("pmfi_stage", "")
+            val pmfiSection  = data.optString("pmfi_section", "")
             if (pmfiStage.isNotBlank()) binding.pmfiStageLabel.text = pmfiStage
-            if (pmfiSection.isNotBlank()) binding.pmfiSectionLabel.text = "Current section: $pmfiSection"
-
-            // ---- Recompute local busy flags (don't override capture/pmfi already set by UI flows) ----
-            isPmfiRunning = isPmfiRunning || pmfi
-            val uiBusy = isCaptureOngoing || calibrating || isPmfiRunning || busy
-            setUiBusy(uiBusy)
-
-            // ---- Keep the preview switch in sync BUT never let it fight capture/pmfi/cal ----
-            binding.switchCameraPreview.setOnCheckedChangeListener(null)
-            binding.switchCameraPreview.isChecked = sw4
-            binding.switchCameraPreview.setOnCheckedChangeListener { _, checked ->
-                val blocked = isCaptureOngoing || (vm.isCalibrating.value == true) || isPmfiRunning
-                if (blocked) {
-                    // Snap back; we don’t allow live preview changes while busy
-                    binding.switchCameraPreview.isChecked = previewActive
-                    return@setOnCheckedChangeListener
-                }
-                triggerButton("SW4")
-                if (checked) startLivePreview() else clearPreview()
+            if (pmfiSection.isNotBlank()) {
+                binding.pmfiSectionLabel.text = "Current section: $pmfiSection"
             }
 
-            // ---- Guard: do NOT touch preview UI while capturing/PMFI/calibrating ----
-            val allowPreviewUiChanges = !isCaptureOngoing && !isPmfiRunning && (vm.isCalibrating.value != true)
+            // --- TRUST PI that PMFI might be running ---
+            isPmfiRunning = pmfiNow
+
+            // *** IMPORTANT CHANGE STARTS HERE ***
+
+            // Old code:
+            // if (!busyNow && !pmfiNow && !calibrating) { isCaptureOngoing = false; ... }
+
+            // New behavior:
+            // Only clear our local busy flags if Pi ALSO says idle AND we weren't
+            // already in the middle of something we *believe* is running.
+            val weThinkBusyLocally =
+                isCaptureOngoing ||
+                        isCalibratingOngoing ||
+                        isPmfiRunning ||
+                        (vm.isCalibrating.value == true)
+
+            if (!busyNow && !pmfiNow && !calibrating) {
+                // Pi is advertising idle.
+
+                if (!weThinkBusyLocally) {
+                    // We're ALSO not in a locally-started run, so yeah, truly idle.
+                    isCaptureOngoing = false
+                    isCalibratingOngoing = false
+                    vm.isCapturing.value = false
+                }
+                // else: do nothing. We keep our optimistic lock.
+            }
+
+            // recompute busy with OR of both views
+            val uiBusy = weThinkBusyLocally || busyNow || calibrating || pmfiNow
+            setUiBusy(uiBusy)
+
+            // keep preview UI in sync, but only if we're not actively running
+            binding.switchCameraPreview.setOnCheckedChangeListener(null)
+            binding.switchCameraPreview.isChecked = sw4
+            attachPreviewToggleListener()
+
+            val allowPreviewUiChanges = !weThinkBusyLocally && !pmfiNow && (vm.isCalibrating.value != true)
             if (allowPreviewUiChanges) {
-                // Mirror server preview state into UI only when idle
                 when {
                     sw4 && mode != PreviewMode.LIVE_FEED -> startLivePreview()
                     !sw4 && mode == PreviewMode.LIVE_FEED -> clearPreview()
                 }
             }
 
-            // ---- If Pi initiated AMSI (SW2), bootstrap capture UI once ----
-            if (lastBtn == "SW2" && !isCaptureOngoing && !isPmfiRunning && (vm.isCalibrating.value != true)) {
+            // If Pi-side SW2 got pressed (physical button), we still bootstrap AMSI UI
+            if (
+                lastBtn == "SW2" &&
+                !isCaptureOngoing &&
+                !isPmfiRunning &&
+                (vm.isCalibrating.value != true)
+            ) {
                 startImageGrid()
                 startCaptureUi()
                 isCaptureOngoing = true
                 vm.capturedBitmaps.value = MutableList(16) { null }
                 vm.imageCount.value = 0
                 vm.isCapturing.value = true
-
-                // Ensure preview visuals are cleared so the grid stays visible
                 clearLiveOnly()
             }
         }
+
     }
+
+    override fun onAttach(baseContext: Context) {
+        // create a context with fontScale forced to 1.0
+        val config = android.content.res.Configuration(baseContext.resources.configuration)
+        config.fontScale = 1.0f
+
+        val scaledContext = baseContext.createConfigurationContext(config)
+        super.onAttach(scaledContext)
+    }
+
 
     private fun clearLiveOnly() {
         if (mode == PreviewMode.LIVE_FEED) {
@@ -1289,12 +1527,22 @@ class ControlFragment : Fragment() {
                     showPmfiUi()
 
                 } else {
-                    // Show server's error string if present (super helpful during dev)
                     val errBody = resp.errorBody()?.string().orEmpty()
                     toast("PMFI start failed: ${resp.code()} $errBody")
+
+                    // Rollback
+                    isPmfiRunning = false
+                    setUiBusy(false)
+                    setPmfiButtonBusy(false)
+                    binding.pmfiStartBtn.text = "Start PMFI"
                 }
             } catch (e: Exception) {
                 toast("Network error: ${e.localizedMessage}")
+
+                isPmfiRunning = false
+                setUiBusy(false)
+                setPmfiButtonBusy(false)
+                binding.pmfiStartBtn.text = "Start PMFI"
             }
         }
     }
@@ -1398,47 +1646,71 @@ class ControlFragment : Fragment() {
         }
     }
 
-    // Keep preview switch disabled while busy; only enable when truly idle
-    // In setUiBusy(busy: Boolean)
-    private fun setUiBusy(busy: Boolean) {
+    // Master UI interlock.
+// Call this any time connection/busy states change.
+// Rules:
+//  - While global busy: ONLY Disconnect is interactive.
+//  - When idle but connected: normal buttons allowed.
+//  - When disconnected: only IP connect controls are allowed.
+    private fun setUiBusy(_ignored: Boolean) {
         val connected   = isPiConnected
         val connecting  = isConnecting
-        val calibrating = vm.isCalibrating.value == true
-        val capturing   = isCaptureOngoing
-        val pmfi        = isPmfiRunning
-
-        // --- Camera preview switch ---
-        val switchEnabled = connected && !capturing && !pmfi && !calibrating && !busy
-        binding.switchCameraPreview.isEnabled = switchEnabled
-
-        // --- AMSI / Calibration ---
-        val normalEnabled = connected && !capturing && !pmfi && !calibrating && !busy
-        binding.buttonStartAmsi.isEnabled = normalEnabled
-        binding.buttonCalibrate.isEnabled = normalEnabled
-
-        // --- PMFI upload (Upload INI) ---
-        val canStartPmfi = connected && !capturing && !calibrating && !pmfi && !busy
-        binding.pmfiStartBtn.isEnabled = canStartPmfi
-        binding.pmfiStartBtn.isClickable = canStartPmfi
-        binding.pmfiStartBtn.alpha = if (canStartPmfi) 1f else 0.5f
-        binding.pmfiStartBtn.text = if (pmfi) "PMFI running…" else "Start PMFI"
-
-        // Keep INI text editable even while PMFI is running
-        binding.pmfiIniEdit.isEnabled = true
-
-        // --- Shutdown button ---
-        binding.buttonShutdown.isEnabled = connected && !pmfi
+        val globalBusy  = isGlobalBusy()
 
         // --- Disconnect button ---
-        // Always enabled when connected or connecting (never greyed out during busy states)
+        // Always allowed if we're in any state except "we literally have no connection at all and haven't even tried".
+        // i.e. user can always bail out if there's an active link or a link being established.
         binding.buttonDisconnect.isEnabled = connected || connecting
         binding.buttonDisconnect.alpha = if (binding.buttonDisconnect.isEnabled) 1f else 0.5f
 
-        // --- IP input and connect button ---
-        val connIdle = !capturing && !calibrating && !pmfi
-        binding.setIpButton.isEnabled    = connIdle && !connected && !connecting
-        binding.ipAddressInput.isEnabled = connIdle && !connected && !connecting
+        // --- Connection widgets (IP box + Set IP button) ---
+        // Once we're connected, we never allow the IP to change until you disconnect.
+        // Also blocked while we're in the middle of connecting.
+        val canEditConnectionFields = !connected && !connecting && !globalBusy
+        binding.setIpButton.isEnabled    = canEditConnectionFields
+        binding.ipAddressInput.isEnabled = canEditConnectionFields
+
+        // --- Camera preview switch ---
+        // You cannot toggle preview while globalBusy.
+        // Also can't toggle if you're not connected.
+        val canTogglePreview = connected && !globalBusy
+        binding.switchCameraPreview.isEnabled = canTogglePreview
+        // If it's disabled while checked, leave it checked visually but grey it out.
+        binding.switchCameraPreview.alpha = if (canTogglePreview) 1f else 0.4f
+
+        // --- AMSI capture button (SW2 trigger) ---
+        // Only if connected AND idle.
+        val canStartAmsi = connected && !globalBusy
+        binding.buttonStartAmsi.isEnabled = canStartAmsi
+        binding.buttonStartAmsi.alpha = if (canStartAmsi) 1f else 0.4f
+
+        // --- Calibration button (SW3 trigger) ---
+        val canStartCal = connected && !globalBusy
+        binding.buttonCalibrate.isEnabled = canStartCal
+        binding.buttonCalibrate.alpha = if (canStartCal) 1f else 0.4f
+
+        // --- PMFI start button ---
+        // Only if connected AND idle.
+        val canStartPmfi = connected && !globalBusy
+        binding.pmfiStartBtn.isEnabled   = canStartPmfi
+        binding.pmfiStartBtn.isClickable = canStartPmfi
+        binding.pmfiStartBtn.alpha       = if (canStartPmfi) 1f else 0.4f
+        binding.pmfiStartBtn.text =
+            if (isPmfiRunning) "PMFI running…" else "Start PMFI"
+
+        // PMFI INI editor:
+        // Lock editing while PMFI is actively running so you can't silently change the text mid-run
+        // (prevents confusion about "what config did I send?")
+        binding.pmfiIniEdit.isEnabled = connected && !isPmfiRunning
+
+        // --- Shutdown button ---
+        // While globalBusy: we DO NOT allow shutdown from the app (you should abort via Disconnect first).
+        // After that, user can reconnect and shut down cleanly when idle.
+        val canShutdown = connected && !globalBusy
+        binding.buttonShutdown.isEnabled = canShutdown
+        binding.buttonShutdown.alpha     = if (canShutdown) 1f else 0.4f
     }
+
 
 
     private fun setPmfiButtonBusy(busy: Boolean) {
@@ -1464,4 +1736,33 @@ class ControlFragment : Fragment() {
             setBaseUrls(saved)
         }
     }
+    // Try to reserve the global busy lock for a specific mode.
+// mode = "amsi", "cal", "pmfi"
+// returns true if we successfully became busy, false if someone else is already busy.
+    private fun tryBeginBusy(mode: String): Boolean {
+        if (isGlobalBusy()) return false
+
+        when (mode) {
+            "amsi" -> {
+                isCaptureOngoing = true
+                isCalibratingOngoing = false
+                isPmfiRunning = false
+            }
+            "cal" -> {
+                isCaptureOngoing = false
+                isCalibratingOngoing = true
+                isPmfiRunning = false
+            }
+            "pmfi" -> {
+                isCaptureOngoing = false
+                isCalibratingOngoing = false
+                isPmfiRunning = true
+            }
+        }
+
+        // lock whole UI right now
+        setUiBusy(true)
+        return true
+    }
+
 }

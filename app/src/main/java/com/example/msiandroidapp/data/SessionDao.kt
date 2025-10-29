@@ -12,7 +12,9 @@ interface SessionDao {
 
     /**
      * All sessions (AMSI, PMFI sections, calibration pseudo-sessions if any),
-     * newest first. "Newest" = completedAtMillis if set, else createdAt, then id.
+     * newest first.
+     *
+     * "Newest" = completedAtMillis if set, else createdAt, then id.
      */
     @Query("""
         SELECT * FROM sessions
@@ -29,6 +31,47 @@ interface SessionDao {
      */
     @Query("SELECT * FROM sessions WHERE id = :sessionId LIMIT 1")
     fun getSessionById(sessionId: Long): LiveData<Session?>
+
+
+    // --------------------------------------------------------------------------------------------
+    // Non-LiveData fetch helpers (for internal logic / background work)
+    // --------------------------------------------------------------------------------------------
+
+    /**
+     * Get the single most recent session row (AMSI or PMFI),
+     * using the exact same recency ordering as getAllSessions().
+     *
+     * This is useful after an AMSI run completes, so we can
+     * locate its folder on disk and total the bytes for the toast.
+     */
+    @Query("""
+        SELECT * FROM sessions
+        ORDER BY 
+            COALESCE(completedAtMillis, createdAt) DESC,
+            createdAt DESC,
+            id DESC
+        LIMIT 1
+    """)
+    suspend fun getMostRecentSession(): Session?
+
+    /**
+     * Look up a row by runId (used for AMSI, where runId == sessionId from the Pi).
+     */
+    @Query("SELECT * FROM sessions WHERE runId = :runId LIMIT 1")
+    suspend fun findByRunId(runId: String): Session?
+
+    /**
+     * Look up a row by (runId, sectionIndex) pair (used for PMFI sections).
+     */
+    @Query("""
+        SELECT * FROM sessions
+        WHERE runId = :runId AND sectionIndex = :sectionIndex
+        LIMIT 1
+    """)
+    suspend fun findByRunIdAndSection(
+        runId: String,
+        sectionIndex: Int
+    ): Session?
 
 
     // --------------------------------------------------------------------------------------------
@@ -55,18 +98,16 @@ interface SessionDao {
     // AMSI / generic single-row upsert
     //
     // For AMSI we currently set runId = sessionId from the Pi, and sectionIndex is usually null.
-    // Semantics:
-    //  - If session.runId is null/blank, we ALWAYS insert a new row (new standalone session).
-    //  - If session.runId is non-blank, we check if a row with that runId already exists.
-    //      - If yes, we UPDATE that row.
-    //      - If not, we INSERT a new row.
     //
-    // NOTE: This is *not* used for PMFI sections anymore, because PMFI wants multiple rows per runId.
-    //       PMFI uses upsertPmfiSection(...) below.
+    // Behaviour:
+    //  - If session.runId is null/blank, always INSERT a new row (treated as standalone session).
+    //  - If session.runId is non-blank:
+    //      * If a row with that runId exists, UPDATE/merge it.
+    //      * Else, INSERT as new.
+    //
+    // NOTE: PMFI does NOT use this. PMFI wants multiple rows per runId,
+    //       so it uses upsertPmfiSection(...) instead.
     // --------------------------------------------------------------------------------------------
-
-    @Query("SELECT * FROM sessions WHERE runId = :runId LIMIT 1")
-    suspend fun findByRunId(runId: String): Session?
 
     @Transaction
     suspend fun upsert(session: Session): Long {
@@ -82,23 +123,43 @@ interface SessionDao {
             // First time we've seen this runId -> insert as-is.
             insert(session)
         } else {
-            // Merge WITHOUT bumping original timestamps.
+            // Merge WITHOUT wiping original timestamps.
             val merged = existing.copy(
-                // keep the original id and timestamps
-                createdAt = existing.createdAt.takeIf { it > 0 } ?: session.createdAt,
+                // keep the original id and oldest timestamps where possible
+                createdAt = if (existing.createdAt > 0) existing.createdAt else session.createdAt,
                 completedAtMillis = existing.completedAtMillis ?: session.completedAtMillis,
 
-                // keep the oldest human timestamp string if we already had one
-                timestamp = if (existing.timestamp.isNotBlank()) existing.timestamp else session.timestamp,
+                // keep the first pretty timestamp string if we already had one
+                timestamp = if (existing.timestamp.isNotBlank()) {
+                    existing.timestamp
+                } else {
+                    session.timestamp
+                },
 
-                // update mutable/live fields
-                location = if (session.location.isNotBlank()) session.location else existing.location,
-                imagePaths = if (session.imagePaths.isNotEmpty()) session.imagePaths else existing.imagePaths,
-                type = session.type.ifBlank { existing.type },
+                // update live / mutable fields
+                location = if (session.location.isNotBlank()) {
+                    session.location
+                } else {
+                    existing.location
+                },
+
+                imagePaths = if (session.imagePaths.isNotEmpty()) {
+                    session.imagePaths
+                } else {
+                    existing.imagePaths
+                },
+
+                type = if (session.type.isNotBlank()) {
+                    session.type
+                } else {
+                    existing.type
+                },
+
                 label = session.label ?: existing.label,
                 runId = existing.runId ?: session.runId,
                 iniName = session.iniName ?: existing.iniName,
                 sectionIndex = session.sectionIndex ?: existing.sectionIndex,
+
                 envTempC = session.envTempC ?: existing.envTempC,
                 envHumidity = session.envHumidity ?: existing.envHumidity,
                 envTsUtc = session.envTsUtc ?: existing.envTsUtc
@@ -109,10 +170,8 @@ interface SessionDao {
         }
     }
 
-
-
     /**
-     * Bulk helper: just loops upsert() for each element.
+     * Bulk helper: loops upsert() for each.
      */
     @Transaction
     suspend fun upsertAll(sessions: List<Session>) {
@@ -123,28 +182,17 @@ interface SessionDao {
     // --------------------------------------------------------------------------------------------
     // PMFI section-based storage
     //
-    // Now we want ONE row PER SECTION of a PMFI run (e.g. each LED wavelength sweep).
+    // We want ONE row PER SECTION of a PMFI run (e.g. each LED sweep or frequency sweep).
     // Key is (runId, sectionIndex).
     //
     // Behaviour:
-    //  - If there's no row yet for (runId, sectionIndex), insert a new Session row with type="PMFI".
-    //  - If that row already exists, merge:
-    //        * append any new PNG paths (dedup + sort),
-    //        * refresh timestamps,
-    //        * carry over env data if provided.
+    //  - If we have not seen (runId, sectionIndex), INSERT a new row type="PMFI".
+    //  - If we have seen it, UPDATE that row:
+    //        * merge/append new image paths, dedup, sort,
+    //        * refresh timestamps and env data.
     //
-    // This gets called every time we receive a new ZIP "part" for that section.
+    // This runs every time we receive a new ZIP part for that section.
     // --------------------------------------------------------------------------------------------
-
-    @Query("""
-        SELECT * FROM sessions
-        WHERE runId = :runId AND sectionIndex = :sectionIndex
-        LIMIT 1
-    """)
-    suspend fun findByRunIdAndSection(
-        runId: String,
-        sectionIndex: Int
-    ): Session?
 
     @Transaction
     suspend fun upsertPmfiSection(
@@ -164,7 +212,7 @@ interface SessionDao {
         val existing = findByRunIdAndSection(runId, sectionIndex)
 
         return if (existing == null) {
-            // First time seeing this (runId, sectionIndex): make a brand new row.
+            // First time seeing this (runId, sectionIndex): brand new row.
             insert(
                 Session(
                     createdAt = completedAtMillis,
@@ -183,8 +231,7 @@ interface SessionDao {
                 )
             )
         } else {
-            // We've already got a row for this (runId, sectionIndex):
-            // merge images and update metadata.
+            // Merge onto existing row.
             val mergedPaths = (existing.imagePaths + newImagePaths)
                 .distinct()
                 .sorted()
@@ -193,7 +240,11 @@ interface SessionDao {
                 existing.copy(
                     completedAtMillis = completedAtMillis,
                     timestamp = timestampStr,
-                    location = locationStr.ifBlank { existing.location },
+                    location = if (locationStr.isNotBlank()) {
+                        locationStr
+                    } else {
+                        existing.location
+                    },
                     imagePaths = mergedPaths,
                     iniName = iniName ?: existing.iniName,
                     envTempC = envTempC ?: existing.envTempC,
@@ -210,10 +261,9 @@ interface SessionDao {
     // --------------------------------------------------------------------------------------------
     // Environment metadata updates
     //
-    // The Pi sends a small JSON with temp/humidity/timestamp for a runId.
-    // We want every PMFI section row for that runId to get those env values,
-    // AND also any AMSI row that reused runId=sessionId.
-    // This UPDATE hits all rows for that runId.
+    // The Pi sends JSON with temp/humidity/timestamp tagged with a runId.
+    // We want every row with that runId (AMSI row or all PMFI section rows)
+    // to inherit those env values.
     // --------------------------------------------------------------------------------------------
 
     @Query("""

@@ -81,6 +81,10 @@ interface PiApiService {
 
     @POST("/trigger")
     suspend fun triggerButton(@Query("button") buttonId: String): Response<ResponseBody> // SW2/SW3/SW4
+    @POST("/abort")
+    suspend fun abortAll(
+        @Query("reason") reason: String = "aborted by client"
+    ): retrofit2.Response<Unit>
 
     // --- PMFI ---
     @POST("/pmfi/start")

@@ -15,7 +15,7 @@
         android:layout_height="?attr/actionBarSize"
         android:background="?attr/colorSurface"
         app:popupTheme="@style/ThemeOverlay.MaterialComponents.Light"
-        app:title="MFI Android App"
+        app:title="MFi Android App"
         app:menu="@menu/menu_gallery_default" />
 
     <!-- Filter row -->

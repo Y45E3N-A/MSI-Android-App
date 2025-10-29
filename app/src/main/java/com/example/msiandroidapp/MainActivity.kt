@@ -22,6 +22,9 @@ class MainActivity : AppCompatActivity() {
         private const val LOCATION_PERMISSION_REQUEST_CODE = 1001
     }
 
+    // track whether we've already started the upload service
+    private var uploadServiceStarted = false
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         binding = ActivityMainBinding.inflate(layoutInflater)
@@ -30,11 +33,9 @@ class MainActivity : AppCompatActivity() {
         val viewPager = binding.viewPager
         val bottomNav = binding.navView
 
-        // --- Setup ViewPager2 adapter ---
         viewPager.adapter = ViewPagerAdapter(this)
-        viewPager.offscreenPageLimit = 2 // Keep both fragments alive
+        viewPager.offscreenPageLimit = 2
 
-        // --- Sync: Tab click → Change ViewPager page ---
         bottomNav.setOnItemSelectedListener { item ->
             when (item.itemId) {
                 R.id.navigation_control -> viewPager.currentItem = 0
@@ -43,8 +44,6 @@ class MainActivity : AppCompatActivity() {
             true
         }
 
-
-        // --- Sync: Swipe → Update selected tab ---
         viewPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
             override fun onPageSelected(position: Int) {
                 super.onPageSelected(position)
@@ -56,16 +55,32 @@ class MainActivity : AppCompatActivity() {
             }
         })
 
-        // --- Check location permission ---
         checkLocationPermission()
+        // DO NOT start the service here anymore
+    }
 
-        // --- Start UploadForegroundService ---
-        startUploadService()
+    override fun onResume() {
+        super.onResume()
+
+        if (!uploadServiceStarted) {
+            startUploadServiceSafely()
+            uploadServiceStarted = true
+        }
     }
+
+    private fun startUploadServiceSafely() {
+        val intent = Intent(this, UploadForegroundService::class.java)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            startForegroundService(intent)
+        } else {
+            startService(intent)
+        }
+    }
+
     fun goToStartPage() {
-        val viewPager = binding.viewPager
-        viewPager.currentItem = 0 // Control tab
+        binding.viewPager.currentItem = 0
     }
+
     private fun checkLocationPermission() {
         val fineGranted = ContextCompat.checkSelfPermission(
             this, Manifest.permission.ACCESS_FINE_LOCATION
@@ -93,20 +108,8 @@ class MainActivity : AppCompatActivity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == LOCATION_PERMISSION_REQUEST_CODE) {
-            if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-                // Location permission granted
-            } else {
-                // Location permission denied
-            }
-        }
-    }
-
-    private fun startUploadService() {
-        val intent = Intent(this, UploadForegroundService::class.java)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            startForegroundService(intent)
-        } else {
-            startService(intent)
+            // you can handle denied/granted here if you want
         }
     }
 }
+

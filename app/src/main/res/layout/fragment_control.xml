@@ -7,8 +7,8 @@
     android:orientation="vertical">
 
     <!-- =========================
-         TOP BAR: Title + Battery + Env chips
-         ========================= -->
+     TOP BAR: Title + Battery + Env chips
+     ========================= -->
     <LinearLayout
         android:id="@+id/topBar"
         android:layout_width="match_parent"
@@ -26,55 +26,75 @@
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="MFI Android App"
+            android:text="MFi Android App"
             android:textStyle="bold"
             android:textSize="22sp" />
 
-        <!-- Battery chip (live) -->
+        <!-- Battery chip (live, non-interactive, fixed width) -->
         <com.google.android.material.chip.Chip
             android:id="@+id/chipBattery"
             style="@style/Widget.MaterialComponents.Chip.Choice"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            android:layout_width="80dp"
+            android:layout_height="32dp"
             android:text="— %"
+            android:textAlignment="center"
+            android:clickable="false"
+            android:focusable="false"
+            android:checkable="false"
+            android:longClickable="false"
             app:chipIcon="@drawable/ic_battery_unknown_24"
             app:chipIconVisible="true"
             app:chipMinHeight="32dp"
             app:chipCornerRadius="16dp"
-            app:checkedIconVisible="false" />
+            app:checkedIconVisible="false"
+            app:rippleColor="@android:color/transparent" />
 
         <Space
             android:layout_width="8dp"
             android:layout_height="0dp" />
 
-        <!-- Temperature chip (live) -->
+        <!-- Temperature chip (live, non-interactive, fixed width) -->
         <com.google.android.material.chip.Chip
             android:id="@+id/topTempChip"
             style="@style/Widget.MaterialComponents.Chip.Choice"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            android:layout_width="80dp"
+            android:layout_height="32dp"
             android:text="Temp: —"
+            android:textAlignment="center"
+            android:clickable="false"
+            android:focusable="false"
+            android:checkable="false"
+            android:longClickable="false"
             app:chipIconVisible="false"
             app:chipMinHeight="32dp"
             app:chipCornerRadius="16dp"
-            app:checkedIconVisible="false" />
+            app:checkedIconVisible="false"
+            app:rippleColor="@android:color/transparent" />
 
         <Space
             android:layout_width="8dp"
             android:layout_height="0dp" />
 
-        <!-- Humidity chip (live) -->
+        <!-- Humidity chip (live, non-interactive, fixed width) -->
         <com.google.android.material.chip.Chip
             android:id="@+id/topHumChip"
             style="@style/Widget.MaterialComponents.Chip.Choice"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
+            android:layout_width="80dp"
+            android:layout_height="32dp"
             android:text="RH: —"
+            android:textAlignment="center"
+            android:clickable="false"
+            android:focusable="false"
+            android:checkable="false"
+            android:longClickable="false"
             app:chipIconVisible="false"
             app:chipMinHeight="32dp"
             app:chipCornerRadius="16dp"
-            app:checkedIconVisible="false" />
+            app:checkedIconVisible="false"
+            app:rippleColor="@android:color/transparent" />
+
     </LinearLayout>
+
 
     <!-- =========================
          TOP: CONTROLS (scrollable)
@@ -225,7 +245,7 @@
                 android:id="@+id/lastPiButtonText"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:text="MFI Button Pressed: --"
+                android:text="MFi Button Pressed: --"
                 android:textSize="18sp"
                 android:layout_marginBottom="20dp" />
 
