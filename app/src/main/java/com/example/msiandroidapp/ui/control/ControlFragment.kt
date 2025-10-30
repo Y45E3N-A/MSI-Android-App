@@ -91,9 +91,14 @@ class ControlFragment : Fragment() {
     private var isPmfiRunning = false
     private var isCalibratingOngoing = false
     private var lastSw4FromServer: Boolean = false
+    // Auto-resume preview (LED warming) after jobs finish
+    private var resumePreviewPending = false
+    private var resumeJob: Job? = null
 
     // Track preview state mirrored from server
     private var previewActive = false
+    // Remember preview state before AMSI so we can restore warming afterwards
+    private var wasPreviewOnBeforeAmsi = false
 
     // Preview UI
     private enum class PreviewMode { NONE, IMAGE_CAPTURE, LIVE_FEED }
@@ -163,18 +168,19 @@ class ControlFragment : Fragment() {
         PiSocketManager.on("amsi_error") { _payload ->
             if (!isAdded) return@on
             requireActivity().runOnUiThread {
-                // kill AMSI UI and release busy lock
                 isCaptureOngoing = false
                 vm.isCapturing.value = false
-
                 binding.captureProgressBar.visibility = View.GONE
                 binding.captureProgressText.visibility = View.GONE
 
-                clearPreview() // dump any partial preview/grid
+                clearPreview()
                 setUiBusy(false)
+                if (wasPreviewOnBeforeAmsi) kickPreviewResume()
+                wasPreviewOnBeforeAmsi = false
                 toast("Capture aborted")
             }
         }
+
 
         // --- Calibration progress / complete / error from Pi ---
         // We'll inline what used to be hookCalibrationSocket(), but with the fixed cleanup-on-error
@@ -518,6 +524,32 @@ class ControlFragment : Fragment() {
             }
         }
     }
+    private fun kickPreviewResume(maxMs: Long = 5000L) {
+        // don't start two loops
+        resumeJob?.cancel()
+        resumeJob = viewLifecycleOwner.lifecycleScope.launch {
+            resumePreviewPending = true
+            val start = System.currentTimeMillis()
+            while (isActive) {
+                // bail if user started something else or disconnected
+                if (!isPiConnected || isGlobalBusy()) break
+
+                // already on? we're done
+                if (lastSw4FromServer) break
+
+                // try to set ON and then nudge state
+                runCatching { ensurePreviewSet(true, timeoutMs = 800) }
+                PiSocketManager.emit("get_state", JSONObject())
+
+                // stop conditions
+                if (lastSw4FromServer) break
+                if (System.currentTimeMillis() - start > maxMs) break
+
+                delay(300)
+            }
+            resumePreviewPending = false
+        }
+    }
 
     private fun ProgressBar.setProgressFast(value: Int) {
         if (Build.VERSION.SDK_INT >= 24) this.setProgress(value, /*animate=*/false)
@@ -576,6 +608,7 @@ class ControlFragment : Fragment() {
         binding.lastPiButtonText.text = "MFi Button Pressed: --"
         binding.switchCameraPreview.isChecked = false
         binding.switchCameraPreview.isEnabled = false
+        wasPreviewOnBeforeAmsi = false
 
         // AMSI progress
         binding.captureProgressBar.progress = 0
@@ -785,8 +818,11 @@ class ControlFragment : Fragment() {
             if (!isPiConnected) { toast("Pi not connected"); return@setOnClickListener }
             val gotLock = tryBeginBusy("amsi"); if (!gotLock) { toast("Busy"); return@setOnClickListener }
 
-            // Always ensure preview is off FIRST
             viewLifecycleOwner.lifecycleScope.launch {
+                // 1) Remember if preview (warming) was ON before we stop it
+                wasPreviewOnBeforeAmsi = lastSw4FromServer || binding.switchCameraPreview.isChecked || previewActive
+
+                // 2) Stop preview and wait for the Pi to ack
                 val ok = killPreviewIfNeededAndWait(2_500)
                 if (!ok && lastSw4FromServer) {
                     // Could not turn preview off — fail fast & unlock
@@ -797,6 +833,7 @@ class ControlFragment : Fragment() {
                     return@launch
                 }
 
+                // 3) Start AMSI UI
                 vm.isCapturing.value = true
                 startImageGrid()
                 startCaptureUi()
@@ -805,6 +842,7 @@ class ControlFragment : Fragment() {
                 binding.buttonStartAmsi.isEnabled = false
                 binding.buttonStartAmsi.alpha = 0.4f
 
+                // 4) Trigger SW2 (AMSI start)
                 runCatching { triggerButton("SW2") }.onFailure { e ->
                     toast("Failed to start capture: ${e.localizedMessage}")
                     isCaptureOngoing = false
@@ -814,8 +852,8 @@ class ControlFragment : Fragment() {
                     binding.buttonStartAmsi.alpha = 1f
                 }
             }
-
         }
+
 
 // CAL (SW3)
         binding.buttonCalibrate.setOnClickListener {
@@ -889,6 +927,8 @@ class ControlFragment : Fragment() {
     }
     // REPLACE ENTIRE FUNCTION
     private fun attachPreviewToggleListener() {
+        resumeJob?.cancel()
+        resumePreviewPending = false
         binding.switchCameraPreview.setOnCheckedChangeListener(null)
 
         // Prevent double taps while we talk to the Pi
@@ -969,13 +1009,16 @@ class ControlFragment : Fragment() {
             ensurePreviewSet(false, timeoutMs)
         } else true
     }
-
+    // Keep track of the AMSI run we’re receiving
+    private var currentAmsiRunId: String? = null
 
     private fun observeUploadProgress() {
         UploadProgressBus.uploadProgress.observe(viewLifecycleOwner) { (sessionId, count) ->
-            // Ignore AMSI UI updates if we're not actually in an AMSI capture state
-            // (or if PMFI / calibration is taking over the UI).
-            if (isPmfiRunning || (vm.isCalibrating.value == true) || !isCaptureOngoing) return@observe
+            // Only ignore if PMFI or CAL are active; allow AMSI finalization even if capture flag flipped
+            if (isPmfiRunning || (vm.isCalibrating.value == true)) return@observe
+
+            // First image of a run? remember runId
+            if (count == 1) currentAmsiRunId = sessionId
 
             Log.d(TAG, "Upload progress $sessionId : $count")
 
@@ -985,79 +1028,43 @@ class ControlFragment : Fragment() {
 
             when {
                 count in 1..15 -> {
-                    // mid-transfer
                     vm.isCapturing.value = true
                     binding.captureProgressBar.visibility = View.VISIBLE
                     binding.captureProgressText.visibility = View.VISIBLE
                 }
 
                 count == 16 -> {
-                    // finished AMSI capture (all 16 PNGs uploaded)
                     vm.isCapturing.value = false
                     binding.captureProgressText.text = "All images received!"
 
-                    // --- NEW BIT: compute total MB of this run and toast it ---
                     viewLifecycleOwner.lifecycleScope.launch {
-                        val humanSize: String? = withContext(Dispatchers.IO) {
-                            try {
-                                val db  = com.example.msiandroidapp.data.AppDatabase.getDatabase(requireContext())
-                                val dao = db.sessionDao()
+                        val id = currentAmsiRunId ?: sessionId
+                        val humanSize = resolveAmsiHumanSize(id)
+                        if (isAdded) toast(if (humanSize != null) "AMSI saved $humanSize" else "AMSI saved")
 
-                                // This uses the new suspend fun getMostRecentSession()
-                                val latest: com.example.msiandroidapp.data.Session? =
-                                    dao.getMostRecentSession()
-
-                                if (latest != null) {
-                                    // Sum the actual files we know about in imagePaths
-                                    val totalBytes = latest.imagePaths.sumOf { pathStr ->
-                                        try {
-                                            val f = java.io.File(pathStr)
-                                            if (f.exists() && f.isFile) f.length() else 0L
-                                        } catch (_: Exception) {
-                                            0L
-                                        }
-                                    }
-
-                                    val mb = totalBytes / (1024.0 * 1024.0)
-                                    String.format(Locale.getDefault(), "%.1f MB", mb)
-                                } else {
-                                    null
-                                }
-                            } catch (e: Exception) {
-                                Log.w(TAG, "Could not calc AMSI size", e)
-                                null
-                            }
-                        }
-
-                        if (isAdded && humanSize != null) {
-                            Toast.makeText(
-                                requireContext(),
-                                "AMSI saved $humanSize",
-                                Toast.LENGTH_SHORT
-                            ).show()
-                        }
-
-                        // After a short delay, do the same cleanup you already had
                         delay(1500)
                         if (!isAdded) return@launch
+
                         binding.captureProgressBar.visibility = View.GONE
                         binding.captureProgressText.visibility = View.GONE
                         clearPreview()
-                        isCaptureOngoing = false
-                        setUiBusy(false)
+                        if (wasPreviewOnBeforeAmsi) kickPreviewResume()
+                        wasPreviewOnBeforeAmsi = false
+
+                        // <—— THIS restores preview, which re-enables LED warming if your Pi ties it to preview
+                        restorePreviewIfNeeded()
+                        wasPreviewOnBeforeAmsi = false
                     }
                 }
 
+
                 else -> {
-                    // 0 or weird (safety fallback)
                     binding.captureProgressBar.visibility = View.GONE
                     binding.captureProgressText.visibility = View.GONE
                 }
             }
         }
     }
-
-
 
 
     // ===== Await helper: wait for preview to drop =====
@@ -1302,6 +1309,7 @@ class ControlFragment : Fragment() {
             isPmfiRunning = false
             previewActive = false
             vm.resetToIdle()
+            wasPreviewOnBeforeAmsi = false
 
             // reset all visible UI surfaces to "fresh"
             resetUiToFreshState()
@@ -1466,7 +1474,7 @@ class ControlFragment : Fragment() {
             // ---- 2) Heartbeat + cosmetic labels ----
             updateConnUi(true)
             if (lastBtn.isNotBlank()) {
-                binding.lastPiButtonText.text = "MFI Button Pressed: $lastBtn"
+                binding.lastPiButtonText.text = "MFi Button Pressed: $lastBtn"
             }
             if (pmfiStage.isNotBlank()) binding.pmfiStageLabel.text = pmfiStage
             if (pmfiSection.isNotBlank()) binding.pmfiSectionLabel.text = "Current section: $pmfiSection"
@@ -1483,6 +1491,8 @@ class ControlFragment : Fragment() {
                 isCalibratingOngoing = false
                 isPmfiRunning = false
                 setUiBusy(true)
+                // Pi started AMSI; remember whether preview was on so we can restore after
+                wasPreviewOnBeforeAmsi = lastSw4FromServer || binding.switchCameraPreview.isChecked || previewActive
                 ensurePreviewOffAsync(1500)
                 startImageGrid()
                 startCaptureUi()
@@ -1531,6 +1541,10 @@ class ControlFragment : Fragment() {
             val localBusy =
                 (isCaptureOngoing || isCalibratingOngoing || isPmfiRunning || (vm.isCalibrating.value == true)) ||
                         pmfiNow || calNow || busyNow
+// If we’re idle and we wanted warming back, try once more immediately
+            if (!localBusy && wasPreviewOnBeforeAmsi && !lastSw4FromServer && !resumePreviewPending) {
+                kickPreviewResume(maxMs = 2500L)
+            }
 
             // Mirror the switch without causing feedback
             binding.switchCameraPreview.setOnCheckedChangeListener(null)
@@ -1547,11 +1561,8 @@ class ControlFragment : Fragment() {
                 }
             } else {
                 // Busy → ensure preview is OFF on Pi; clear only live canvas (preserve AMSI grid)
-                if (sw4) triggerButton("SW4")
                 previewActive = false
                 clearLiveOnly()
-                sw4 = false
-                lastSw4FromServer = false
             }
 
             // ---- 6) Failsafe: if everything is idle, drop any lingering UI flags ----
@@ -1571,6 +1582,21 @@ class ControlFragment : Fragment() {
                 (isCaptureOngoing || isCalibratingOngoing || isPmfiRunning || (vm.isCalibrating.value == true)) ||
                         busyNow || calNow || pmfiNow
             setUiBusy(uiBusy)
+        }
+    }
+    private fun shouldRestorePreviewAfterJobs(): Boolean {
+        // Only if we captured that preview was on earlier,
+        // we’re connected, and nothing else is busy now.
+        return wasPreviewOnBeforeAmsi && isPiConnected && !isGlobalBusy()
+    }
+
+    private fun restorePreviewIfNeeded() {
+        if (!shouldRestorePreviewAfterJobs()) return
+        // Don’t fight the user if they manually switched it off meanwhile
+        viewLifecycleOwner.lifecycleScope.launch {
+            // Ask Pi to set preview ON and wait for ack; ignore if it times out
+            runCatching { ensurePreviewSet(true, timeoutMs = 2_000) }
+            wasPreviewOnBeforeAmsi = false
         }
     }
 
@@ -1687,6 +1713,43 @@ class ControlFragment : Fragment() {
                 toast("Network error: ${e.localizedMessage}")
             }
         }
+    }
+    // Robust AMSI size resolver with short retry window (up to ~2s).
+    private suspend fun resolveAmsiHumanSize(runId: String): String? = withContext(Dispatchers.IO) {
+        // Try a few times because DB/file I/O can lag the 16th image event
+        repeat(8) { attempt ->
+            try {
+                val db  = com.example.msiandroidapp.data.AppDatabase.getDatabase(requireContext())
+                val dao = db.sessionDao()
+                val s   = dao.findByRunId(runId)
+
+                // 1) Prefer parent of first persisted image path (most reliable)
+                val fromDbDir: java.io.File? = s?.imagePaths?.firstOrNull()?.let { path ->
+                    java.io.File(path).parentFile?.takeIf { it.exists() }
+                }
+
+                // 2) Fallback: app-scoped sessions folder (scoped storage-safe)
+                //    e.g. /storage/emulated/0/Android/data/<pkg>/files/MSI_App/Sessions/<runId>
+                val appFiles = requireContext().getExternalFilesDir(null)
+                val fallbackDir = java.io.File(appFiles, "MSI_App/Sessions/$runId")
+                    .takeIf { it.exists() }
+
+                val dir = fromDbDir ?: fallbackDir
+                if (dir != null) {
+                    val totalBytes = dir.walkTopDown()
+                        .filter { it.isFile }
+                        .map { it.length() }
+                        .sum()
+                    val mb = totalBytes / (1024.0 * 1024.0)
+                    return@withContext String.format(Locale.getDefault(), "%.1f MB", mb)
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "resolveAmsiHumanSize attempt $attempt failed: ${e.message}")
+            }
+            // Backoff a bit then try again
+            Thread.sleep(250)
+        }
+        null
     }
 
     // ===== Preview UI helpers =====

@@ -234,7 +234,7 @@ class GalleryFragment : Fragment() {
         val menu = toolbar.menu
 
         // Title reflects mode
-        toolbar.title = if (inSelectionMode) "$selectedCount selected" else "MFI Android App"
+        toolbar.title = if (inSelectionMode) "$selectedCount selected" else "MFi Android App"
 
         // Visibility of actions in header menu
         menu.findItem(R.id.action_share_selected)?.isVisible = inSelectionMode

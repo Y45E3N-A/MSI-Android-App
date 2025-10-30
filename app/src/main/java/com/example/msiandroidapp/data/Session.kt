@@ -12,11 +12,11 @@ import androidx.room.PrimaryKey
 @Entity(
     tableName = "sessions",
     indices = [
-        // We want at most one row per PMFI section.
-        // runId may repeat across sections, but (runId, sectionIndex) should be unique.
+        Index(value = ["runId"]),                       // speeds up lookups/updates
         Index(value = ["runId", "sectionIndex"], unique = true)
     ]
 )
+
 data class Session(
     @PrimaryKey(autoGenerate = true) val id: Long = 0L,
 
