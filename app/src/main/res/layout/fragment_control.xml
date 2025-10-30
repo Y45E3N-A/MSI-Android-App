@@ -57,7 +57,7 @@
         <com.google.android.material.chip.Chip
             android:id="@+id/topTempChip"
             style="@style/Widget.MaterialComponents.Chip.Choice"
-            android:layout_width="80dp"
+            android:layout_width="90dp"
             android:layout_height="32dp"
             android:text="Temp: —"
             android:textAlignment="center"
