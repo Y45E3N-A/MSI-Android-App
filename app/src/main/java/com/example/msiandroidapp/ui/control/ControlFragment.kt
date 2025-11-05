@@ -1013,15 +1013,19 @@ class ControlFragment : Fragment() {
     private var currentAmsiRunId: String? = null
 
     private fun observeUploadProgress() {
+        var lastHandledRunId: String? = null
+
         UploadProgressBus.uploadProgress.observe(viewLifecycleOwner) { (sessionId, count) ->
-            // Only ignore if PMFI or CAL are active; allow AMSI finalization even if capture flag flipped
+            // Ignore replayed/stale emissions from previous app sessions
+            if (sessionId == lastHandledRunId && count == 16) return@observe
+
+            // Ignore if we’re not currently doing AMSI
             if (isPmfiRunning || (vm.isCalibrating.value == true)) return@observe
 
-            // First image of a run? remember runId
+            // First image → mark as active run
             if (count == 1) currentAmsiRunId = sessionId
 
             Log.d(TAG, "Upload progress $sessionId : $count")
-
             vm.imageCount.value = count
             binding.captureProgressBar.progress = count
             binding.captureProgressText.text = "Receiving images: $count/16"
@@ -1034,29 +1038,29 @@ class ControlFragment : Fragment() {
                 }
 
                 count == 16 -> {
+                    lastHandledRunId = sessionId
                     vm.isCapturing.value = false
                     binding.captureProgressText.text = "All images received!"
 
                     viewLifecycleOwner.lifecycleScope.launch {
                         val id = currentAmsiRunId ?: sessionId
                         val humanSize = resolveAmsiHumanSize(id)
-                        if (isAdded) toast(if (humanSize != null) "AMSI saved $humanSize" else "AMSI saved")
+                        // Only show toast if this run actually happened during this session
+                        if (isAdded && currentAmsiRunId == sessionId) {
+                            toast(if (humanSize != null) "AMSI saved $humanSize" else "AMSI saved")
+                        }
 
                         delay(1500)
                         if (!isAdded) return@launch
-
                         binding.captureProgressBar.visibility = View.GONE
                         binding.captureProgressText.visibility = View.GONE
                         clearPreview()
                         if (wasPreviewOnBeforeAmsi) kickPreviewResume()
                         wasPreviewOnBeforeAmsi = false
-
-                        // <—— THIS restores preview, which re-enables LED warming if your Pi ties it to preview
                         restorePreviewIfNeeded()
                         wasPreviewOnBeforeAmsi = false
                     }
                 }
-
 
                 else -> {
                     binding.captureProgressBar.visibility = View.GONE
