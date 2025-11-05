@@ -30,75 +30,66 @@
             android:gravity="start|center_vertical"
             android:layout_marginBottom="10dp" />
 
-        <!-- Larger chips row -->
         <LinearLayout
             android:id="@+id/chipsRow"
-            android:layout_width="wrap_content"
+            android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="horizontal"
-            android:gravity="center_horizontal"
-            android:layout_gravity="center_horizontal">
+            android:gravity="center_vertical">
 
-            <!-- Battery chip -->
             <com.google.android.material.chip.Chip
                 android:id="@+id/chipBattery"
                 style="@style/Widget.MaterialComponents.Chip.Choice"
-                android:layout_width="120dp"
+                android:layout_width="0dp"
                 android:layout_height="40dp"
-                android:text="— %"
+                android:layout_weight="1"
+                android:minWidth="88dp"
+                android:maxLines="1"
+                android:ellipsize="end"
                 android:textSize="16sp"
-                android:textAlignment="center"
-                android:clickable="false"
-                android:focusable="false"
-                android:checkable="false"
-                android:longClickable="false"
-                android:layout_marginEnd="12dp"
-                app:chipIcon="@drawable/ic_battery_unknown_24"
-                app:chipIconVisible="true"
+                android:text="— %"
+                android:layout_marginEnd="6dp"
                 app:chipMinHeight="40dp"
                 app:chipCornerRadius="20dp"
+                app:chipIcon="@drawable/ic_battery_unknown_24"
+                app:chipIconVisible="true"
                 app:checkedIconVisible="false"
-                app:rippleColor="@android:color/transparent" />
+                app:chipIconSize="18dp"
+                app:iconStartPadding="6dp" />
 
-            <!-- Temperature chip -->
+
             <com.google.android.material.chip.Chip
                 android:id="@+id/topTempChip"
                 style="@style/Widget.MaterialComponents.Chip.Choice"
-                android:layout_width="130dp"
+                android:layout_width="0dp"
                 android:layout_height="40dp"
-                android:text="Temp: — °C"
+                android:layout_weight="1"
+                android:minWidth="88dp"
+                android:maxLines="1"
+                android:ellipsize="end"
                 android:textSize="16sp"
-                android:textAlignment="center"
-                android:clickable="false"
-                android:focusable="false"
-                android:checkable="false"
-                android:longClickable="false"
-                android:layout_marginEnd="12dp"
-                app:chipIconVisible="false"
+                android:text="Temp: — °C"
+                android:layout_marginEnd="6dp"
                 app:chipMinHeight="40dp"
-                app:chipCornerRadius="20dp"
-                app:checkedIconVisible="false"
-                app:rippleColor="@android:color/transparent" />
+                app:chipCornerRadius="20dp" />
 
-            <!-- Humidity chip -->
             <com.google.android.material.chip.Chip
                 android:id="@+id/topHumChip"
                 style="@style/Widget.MaterialComponents.Chip.Choice"
-                android:layout_width="120dp"
+                android:layout_width="0dp"
                 android:layout_height="40dp"
-                android:text="RH: — %"
+                android:layout_weight="1"
+                android:minWidth="88dp"
+                android:maxLines="1"
+                android:ellipsize="end"
                 android:textSize="16sp"
-                android:textAlignment="center"
-                android:clickable="false"
-                android:focusable="false"
-                android:checkable="false"
-                android:longClickable="false"
-                app:chipIconVisible="false"
+                android:text="RH: — %"
                 app:chipMinHeight="40dp"
-                app:chipCornerRadius="20dp"
-                app:checkedIconVisible="false"
-                app:rippleColor="@android:color/transparent" />
+                app:chipCornerRadius="20dp" />
         </LinearLayout>
+
+
+
     </LinearLayout>
 
 
