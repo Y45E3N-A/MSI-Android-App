@@ -11,6 +11,7 @@ import android.view.inputmethod.InputMethodManager
 import android.widget.ScrollView
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
+import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
 import androidx.exifinterface.media.ExifInterface
 import androidx.fragment.app.Fragment
@@ -234,7 +235,9 @@ class GalleryFragment : Fragment() {
         val menu = toolbar.menu
 
         // Title reflects mode
-        toolbar.title = if (inSelectionMode) "$selectedCount selected" else "MFi Android App"
+        toolbar.title = if (inSelectionMode) "$selectedCount selected" else "MFi Android App v3.1"
+
+
 
         // Visibility of actions in header menu
         menu.findItem(R.id.action_share_selected)?.isVisible = inSelectionMode

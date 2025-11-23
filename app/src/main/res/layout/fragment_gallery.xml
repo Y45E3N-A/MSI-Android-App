@@ -7,16 +7,24 @@
     android:layout_height="match_parent"
     android:background="?android:colorBackground">
 
-    <!-- Top app bar (MaterialComponents / M2) -->
+    <!-- Top title bar styled to match Control tab header -->
     <com.google.android.material.appbar.MaterialToolbar
         android:id="@+id/gallery_toolbar"
         style="@style/Widget.MaterialComponents.Toolbar"
         android:layout_width="match_parent"
         android:layout_height="?attr/actionBarSize"
-        android:background="?attr/colorSurface"
+        android:background="@android:color/transparent"
+        android:paddingStart="16dp"
+        android:paddingEnd="16dp"
+        android:paddingTop="12dp"
+        android:paddingBottom="8dp"
+        app:title="MFi Android App v3.1"
+        app:titleTextAppearance="@style/GalleryTitleText"
+        app:titleTextColor="?attr/titleTextColor"
         app:popupTheme="@style/ThemeOverlay.MaterialComponents.Light"
-        app:title="MFi Android App"
         app:menu="@menu/menu_gallery_default" />
+
+
 
     <!-- Filter row -->
     <LinearLayout
@@ -96,7 +104,6 @@
             android:fadingEdgeLength="8dp"
             android:overScrollMode="always"
             android:scrollbarStyle="outsideOverlay" />
-
 
         <LinearLayout
             android:id="@+id/empty_state"

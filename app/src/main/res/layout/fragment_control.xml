@@ -24,11 +24,14 @@
             android:id="@+id/titleText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="MFi Android App"
-            android:textStyle="bold"
-            android:textSize="22sp"
+            android:text="MFi Android App v3.1"
+            android:textSize="20sp"
+            android:textStyle="normal"
+            android:textColor="?attr/titleTextColor"
             android:gravity="start|center_vertical"
             android:layout_marginBottom="10dp" />
+
+
 
         <LinearLayout
             android:id="@+id/chipsRow"
@@ -306,7 +309,7 @@
                 android:id="@+id/pmfiHeader"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="PMFI (INI only)"
+                android:text="PMFI (MSI v2.1+ only)"
                 android:textStyle="bold"
                 android:textSize="18sp"
                 android:layout_marginTop="16dp"
