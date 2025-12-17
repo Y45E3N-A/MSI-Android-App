@@ -235,7 +235,7 @@ class GalleryFragment : Fragment() {
         val menu = toolbar.menu
 
         // Title reflects mode
-        toolbar.title = if (inSelectionMode) "$selectedCount selected" else "MFi Android App v3.1"
+        toolbar.title = if (inSelectionMode) "$selectedCount selected" else "MFi Android App v3.2"
 
 
 

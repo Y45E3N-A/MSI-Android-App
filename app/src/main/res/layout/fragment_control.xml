@@ -7,8 +7,8 @@
     android:orientation="vertical">
 
     <!-- =========================
-  TOP BAR: Left-aligned title + larger centered chips below
-  ========================= -->
+      TOP BAR: Left-aligned title + larger centered chips below
+      ========================= -->
     <LinearLayout
         android:id="@+id/topBar"
         android:layout_width="match_parent"
@@ -24,14 +24,12 @@
             android:id="@+id/titleText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="MFi Android App v3.1"
+            android:text="MFi Android App v3.2"
             android:textSize="20sp"
             android:textStyle="normal"
             android:textColor="?attr/titleTextColor"
             android:gravity="start|center_vertical"
             android:layout_marginBottom="10dp" />
-
-
 
         <LinearLayout
             android:id="@+id/chipsRow"
@@ -59,7 +57,6 @@
                 app:checkedIconVisible="false"
                 app:chipIconSize="18dp"
                 app:iconStartPadding="6dp" />
-
 
             <com.google.android.material.chip.Chip
                 android:id="@+id/topTempChip"
@@ -91,10 +88,7 @@
                 app:chipCornerRadius="20dp" />
         </LinearLayout>
 
-
-
     </LinearLayout>
-
 
     <!-- =========================
          TOP: CONTROLS (scrollable)
@@ -105,7 +99,9 @@
         android:layout_height="0dp"
         android:layout_weight="1"
         android:fillViewport="true"
-        android:fadeScrollbars="false">
+        android:fadeScrollbars="false"
+        android:paddingBottom="72dp"
+        android:clipToPadding="false">
 
         <LinearLayout
             android:id="@+id/controls_container"
