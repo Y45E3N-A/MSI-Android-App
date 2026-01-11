@@ -522,6 +522,7 @@ class GalleryFragment : Fragment() {
 
     private fun openCalibration(profile: CalibrationProfile) {
         val wlToNorm = extractCalibrationMap(profile)
+        val imagePaths = calibrationImagePaths(profile)
 
         val whenStr = profile.timestampStr.ifBlank {
             runCatching {
@@ -568,7 +569,28 @@ class GalleryFragment : Fragment() {
                     android.content.ClipData.newPlainText("Calibration Results", tv.text)
                 )
             }
+            .setNegativeButton("View photos") { _, _ ->
+                if (imagePaths.isEmpty()) {
+                    msg("No calibration photos found.")
+                    return@setNegativeButton
+                }
+                startActivity(
+                    SessionDetailActivity.newIntentForImagePaths(
+                        requireContext(),
+                        ArrayList(imagePaths)
+                    )
+                )
+            }
             .show()
+    }
+
+    private fun calibrationImagePaths(profile: CalibrationProfile): List<String> {
+        return try {
+            val arr = JSONArray(profile.imagePathsJson)
+            List(arr.length()) { i -> arr.getString(i) }
+        } catch (_: Exception) {
+            emptyList()
+        }
     }
 
 
@@ -590,7 +612,7 @@ class GalleryFragment : Fragment() {
             existing to { newName: String -> renameSession(selSessionId, newName) }
         }
 
-    val input = android.widget.EditText(requireContext()).apply {
+        val input = android.widget.EditText(requireContext()).apply {
             hint = "Enter new name"
             setSingleLine(true)
             setText(currentTitle)
