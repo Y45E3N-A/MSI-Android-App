@@ -22,11 +22,22 @@ class SessionDetailActivity : AppCompatActivity() {
     private lateinit var emptyView: TextView
 
     private var sessionIdArg: Long = -1L
+    private var imagePathsArg: ArrayList<String>? = null
 
     private val permissionRequester = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { granted ->
-        if (granted) loadSession(sessionIdArg) else showEmpty("Permission required to display images.")
+        if (!granted) {
+            showEmpty("Permission required to display images.")
+            return@registerForActivityResult
+        }
+
+        val paths = imagePathsArg
+        if (paths != null && paths.isNotEmpty()) {
+            loadFromPaths(paths)
+        } else {
+            loadSession(sessionIdArg)
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -37,19 +48,26 @@ class SessionDetailActivity : AppCompatActivity() {
         viewPager = findViewById(R.id.viewPager)
         emptyView = findViewById(R.id.empty_view)
 
+        imagePathsArg = intent.getStringArrayListExtra(EXTRA_IMAGE_PATHS)
         sessionIdArg = intent.getLongExtra(EXTRA_SESSION_ID, -1L)
-        if (sessionIdArg <= 0L) {
+
+        val hasExplicitPaths = !imagePathsArg.isNullOrEmpty()
+        if (!hasExplicitPaths && sessionIdArg <= 0L) {
             showEmpty("Missing session id.")
             return
         }
 
         // If your images are saved under a public folder (e.g. /storage/emulated/0/MSI_App/...),
         // Android 13+ needs READ_MEDIA_IMAGES at runtime. If you store under internal or
-        // getExternalFilesDir(...), the permission is not required — this gate is safe either way.
+        // getExternalFilesDir(...), the permission is not required – this gate is safe either way.
         if (!hasReadImagesPermission()) {
             requestReadImagesPermission()
         } else {
-            loadSession(sessionIdArg)
+            if (hasExplicitPaths) {
+                loadFromPaths(imagePathsArg.orEmpty())
+            } else {
+                loadSession(sessionIdArg)
+            }
         }
     }
 
@@ -115,6 +133,24 @@ class SessionDetailActivity : AppCompatActivity() {
             }
     }
 
+    private fun loadFromPaths(imagePaths: List<String>) {
+        val uris = imagePaths
+            .map(::File)
+            .filter { it.isFile && it.length() > 0 }
+            .sortedBy { it.name.lowercase() }
+            .map { Uri.fromFile(it) }
+
+        if (uris.isEmpty()) {
+            showEmpty("No images found for this calibration.")
+            return
+        }
+
+        emptyView.visibility = View.GONE
+        viewPager.visibility = View.VISIBLE
+        viewPager.adapter = ImagePagerAdapter(uris)
+        viewPager.offscreenPageLimit = 1
+    }
+
     private fun showEmpty(message: String) {
         viewPager.visibility = View.GONE
         emptyView.visibility = View.VISIBLE
@@ -123,10 +159,16 @@ class SessionDetailActivity : AppCompatActivity() {
 
     companion object {
         const val EXTRA_SESSION_ID = "session_id"
+        const val EXTRA_IMAGE_PATHS = "image_paths"
 
         fun newIntent(context: Context, sessionId: Long): Intent =
             Intent(context, SessionDetailActivity::class.java).apply {
                 putExtra(EXTRA_SESSION_ID, sessionId)
+            }
+
+        fun newIntentForImagePaths(context: Context, imagePaths: ArrayList<String>): Intent =
+            Intent(context, SessionDetailActivity::class.java).apply {
+                putStringArrayListExtra(EXTRA_IMAGE_PATHS, imagePaths)
             }
     }
 }

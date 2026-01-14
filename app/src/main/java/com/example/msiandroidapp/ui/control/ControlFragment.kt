@@ -48,6 +48,9 @@ import android.os.Build
 import android.widget.ProgressBar
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import android.net.Uri
+import android.provider.OpenableColumns
+import java.io.File
 
 private const val TAG = "ControlFragment"
 
@@ -94,9 +97,13 @@ class ControlFragment : Fragment() {
     // Auto-resume preview (LED warming) after jobs finish
     private var resumePreviewPending = false
     private var resumeJob: Job? = null
+    private var calStartGraceUntil = 0L
 
     // Track preview state mirrored from server
     private var previewActive = false
+    private var previewRequestedState: Boolean? = null
+    private var previewRequestPendingUntil: Long = 0L
+    private val previewRequestAckWindowMs = 900L
     // Remember preview state before AMSI so we can restore warming afterwards
     private var wasPreviewOnBeforeAmsi = false
 
@@ -581,6 +588,7 @@ class ControlFragment : Fragment() {
     }
     // Returns true if the instrument should be treated as BUSY (user must not start anything else)
     private fun isGlobalBusy(): Boolean {
+        if (now() < calStartGraceUntil) return true
         val inCalCooldown = now() < calCooldownUntil
         val calFlag = (isCalibratingOngoing || vm.isCalibrating.value == true) && !inCalCooldown
         return isCaptureOngoing || isPmfiRunning || calFlag
@@ -657,6 +665,26 @@ class ControlFragment : Fragment() {
         if (res.resultCode == android.app.Activity.RESULT_OK) {
             val txt = res.data?.getStringExtra(PmfiEditorActivity.EXTRA_RESULT_TEXT) ?: return@registerForActivityResult
             binding.pmfiIniEdit.setText(txt)
+        }
+    }
+    private val pmfiIniFilePicker = registerForActivityResult(
+        ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri == null) return@registerForActivityResult
+        val displayName = queryDisplayName(uri) ?: "pmfi_upload.ini"
+        val lowerName = displayName.lowercase(Locale.getDefault())
+        if (!lowerName.endsWith(".ini") && !lowerName.endsWith(".txt")) {
+            toast("Please select a .ini or .txt file")
+            return@registerForActivityResult
+        }
+        viewLifecycleOwner.lifecycleScope.launch {
+            val iniText = readUriText(uri).trim()
+            if (iniText.isBlank()) {
+                toast("Selected file is empty")
+                return@launch
+            }
+            binding.pmfiIniEdit.setText(iniText)
+            uploadPmfiIniText(iniText, displayName)
         }
     }
     override fun onResume() {
@@ -776,6 +804,15 @@ class ControlFragment : Fragment() {
             }
             pmfiEditorLauncher.launch(intent)
         }
+        binding.pmfiUploadIniBtn.setOnClickListener {
+            if (!isPiConnected) { toast("Not connected"); return@setOnClickListener }
+            val iniText = binding.pmfiIniEdit.text?.toString()?.trim().orEmpty()
+            if (iniText.isBlank()) {
+                pmfiIniFilePicker.launch(arrayOf("text/plain", "text/*", "application/octet-stream"))
+            } else {
+                uploadPmfiIniText(iniText, "pmfi_upload.ini")
+            }
+        }
         // Disconnect
         binding.buttonDisconnect.setOnClickListener {
             when {
@@ -822,8 +859,9 @@ class ControlFragment : Fragment() {
                 // 1) Remember if preview (warming) was ON before we stop it
                 wasPreviewOnBeforeAmsi = lastSw4FromServer || binding.switchCameraPreview.isChecked || previewActive
 
-                // 2) Stop preview and wait for the Pi to ack
-                val ok = killPreviewIfNeededAndWait(2_500)
+                // 2) Stop preview in background (server will hard-stop before capture)
+                ensurePreviewOffAsync(1500)
+                val ok = true
                 if (!ok && lastSw4FromServer) {
                     // Could not turn preview off — fail fast & unlock
                     isCaptureOngoing = false
@@ -860,8 +898,15 @@ class ControlFragment : Fragment() {
             if (!isPiConnected) { toast("Not connected"); return@setOnClickListener }
             val gotLock = tryBeginBusy("cal"); if (!gotLock) { toast("Busy"); return@setOnClickListener }
 
+            calStartGraceUntil = now() + 1200L
+            vm.startCalibration(totalChannels = 16)
+            showCalUi(true)
+            binding.buttonCalibrate.isEnabled = false
+            binding.buttonCalibrate.alpha = 0.4f
+
             viewLifecycleOwner.lifecycleScope.launch {
-                val ok = killPreviewIfNeededAndWait(2_000)
+                ensurePreviewOffAsync(1500)
+                val ok = true
                 if (!ok && lastSw4FromServer) {
                     isCalibratingOngoing = false
                     vm.isCalibrating.value = false
@@ -870,10 +915,6 @@ class ControlFragment : Fragment() {
                     return@launch
                 }
 
-                vm.startCalibration(totalChannels = 16)
-                showCalUi(true)
-                binding.buttonCalibrate.isEnabled = false
-                binding.buttonCalibrate.alpha = 0.4f
                 triggerButton("SW3") // end/unlock via cal_complete / cal_error
             }
         }
@@ -891,7 +932,8 @@ class ControlFragment : Fragment() {
             binding.pmfiStartBtn.text = "PMFI running…"
 
             viewLifecycleOwner.lifecycleScope.launch {
-                val ok = killPreviewIfNeededAndWait(2_000)
+                ensurePreviewOffAsync(1500)
+                val ok = true
                 if (!ok && lastSw4FromServer) {
                     isPmfiRunning = false
                     setUiBusy(false)
@@ -955,14 +997,11 @@ class ControlFragment : Fragment() {
             binding.switchCameraPreview.alpha = 0.4f
 
             viewLifecycleOwner.lifecycleScope.launch {
-                val ok = ensurePreviewSet(checked, timeoutMs = 2_000)
-                // Reflect server-authoritative result
-                binding.switchCameraPreview.setOnCheckedChangeListener(null)
-                binding.switchCameraPreview.isChecked = ok && checked
-                attachPreviewToggleListener()
-
+                requestPreviewSet(checked)
+                delay(400)
                 binding.switchCameraPreview.isEnabled = isPiConnected && !isGlobalBusy()
-                binding.switchCameraPreview.alpha = if (binding.switchCameraPreview.isEnabled) 1f else 0.4f
+                binding.switchCameraPreview.alpha =
+                    if (binding.switchCameraPreview.isEnabled) 1f else 0.4f
                 toggleInFlight = false
             }
         }
@@ -972,6 +1011,33 @@ class ControlFragment : Fragment() {
 
     // Ask the Pi to set preview ON/OFF and wait for ack via 'sw4' in state updates.
 // Returns true if the Pi reported the requested state before timeout.
+    private fun markPreviewRequest(targetOn: Boolean, windowMs: Long = previewRequestAckWindowMs) {
+        previewRequestedState = targetOn
+        previewRequestPendingUntil = System.currentTimeMillis() + windowMs
+    }
+
+    private fun clearPreviewRequest() {
+        previewRequestedState = null
+        previewRequestPendingUntil = 0L
+    }
+
+    private fun isPreviewRequestPending(nowMs: Long = System.currentTimeMillis()): Boolean {
+        return previewRequestedState != null && nowMs < previewRequestPendingUntil
+    }
+
+    private fun requestPreviewSet(targetOn: Boolean) {
+        if (!targetOn) clearPreview() else startLivePreview()
+        previewActive = targetOn
+
+        if (lastSw4FromServer == targetOn) {
+            clearPreviewRequest()
+            return
+        }
+
+        markPreviewRequest(targetOn)
+        runCatching { triggerButton("SW4") }
+    }
+
     private suspend fun ensurePreviewSet(targetOn: Boolean, timeoutMs: Long = 2_000L): Boolean {
         // Local canvas update for instant UX
         if (!targetOn) clearPreview() else startLivePreview()
@@ -979,16 +1045,18 @@ class ControlFragment : Fragment() {
         // If server already in target state, we're done
         if (lastSw4FromServer == targetOn) {
             previewActive = targetOn
+            clearPreviewRequest()
             return true
         }
 
-        // Send one toggle request
+        markPreviewRequest(targetOn)
         runCatching { triggerButton("SW4") }
 
         val start = System.currentTimeMillis()
         while ((System.currentTimeMillis() - start) < timeoutMs) {
             if (lastSw4FromServer == targetOn) {
                 previewActive = targetOn
+                clearPreviewRequest()
                 return true
             }
             delay(40)
@@ -998,6 +1066,9 @@ class ControlFragment : Fragment() {
         if (!targetOn) {
             previewActive = false
             clearPreview()
+        }
+        if (!isPreviewRequestPending()) {
+            clearPreviewRequest()
         }
         return lastSw4FromServer == targetOn
     }
@@ -1090,6 +1161,7 @@ class ControlFragment : Fragment() {
     // --- Battery telemetry (freshness tracking) ---
     private var lastBatteryEventAt: Long = 0L
     private val batteryPollMs = 10_000L
+    private val batteryLowThresholdPct = 20
 
     private fun hookBatterySocket() {
         // payload is the snapshot (server emits it flat)
@@ -1137,14 +1209,29 @@ class ControlFragment : Fragment() {
         val present = if (snap.has("present")) snap.optBoolean("present") else null
         val soc     = snap.optIntOrNull("soc_pct")
         val volt    = snap.optDoubleOrNull("voltage_v")
+        val current = snap.optDoubleOrNull("current_a")
+
+        val isLow = soc != null && soc < batteryLowThresholdPct
+        val isPluggedIn = state == "NOT_CHARGING" && current != null && current <= 0.03
+        val isOnBattery = state == "NOT_CHARGING" && current != null && current > 0.03
 
         // Choose icon
         val iconRes = when (state) {
-            "CHARGING"     -> R.drawable.ic_battery_charging_24
-            "FAULT"        -> R.drawable.ic_battery_alert_24
-            "NO_BATTERY"   -> R.drawable.ic_battery_unknown_24
-            "NOT_CHARGING" -> if (present == false) R.drawable.ic_battery_unknown_24 else R.drawable.ic_battery_24
-            else           -> if (present == false) R.drawable.ic_battery_unknown_24 else R.drawable.ic_battery_24
+            "CHARGING"   -> R.drawable.ic_battery_charging_24
+            "FAULT"      -> R.drawable.ic_battery_alert_24
+            "NO_BATTERY" -> R.drawable.ic_battery_unknown_24
+            "NOT_CHARGING" -> when {
+                present == false -> R.drawable.ic_battery_unknown_24
+                isLow -> R.drawable.ic_battery_alert_24
+                isPluggedIn -> R.drawable.ic_battery_charging_24
+                isOnBattery -> R.drawable.ic_battery_24
+                else -> R.drawable.ic_battery_24
+            }
+            else -> when {
+                present == false -> R.drawable.ic_battery_unknown_24
+                isLow -> R.drawable.ic_battery_alert_24
+                else -> R.drawable.ic_battery_24
+            }
         }
 
         // Label: prefer %; else show voltage
@@ -1465,7 +1552,8 @@ class ControlFragment : Fragment() {
 
     private fun onStateUpdate(data: JSONObject) {
         // ---- 1) Parse the snapshot (server is source of truth) ----
-        var sw4         = data.optBoolean("sw4", false)
+        val serverSw4   = data.optBoolean("sw4", false)
+        var sw4         = serverSw4
         var busyNow     = data.optBoolean("busy", false)
         var calNow      = data.optBoolean("calibrating", false)
         val pmfiNow     = data.optBoolean("pmfi_running", false)
@@ -1507,6 +1595,9 @@ class ControlFragment : Fragment() {
 
             // CAL (SW3)
             if (lastBtn == "SW3" && !isCaptureOngoing && !isPmfiRunning && !isCalibratingOngoing && (vm.isCalibrating.value != true)) {
+                calStartGraceUntil = now() + 1200L
+                busyNow = true
+                calNow = true
                 isCalibratingOngoing = true
                 isCaptureOngoing = false
                 isPmfiRunning = false
@@ -1532,21 +1623,32 @@ class ControlFragment : Fragment() {
             if (calNow && !isCalibratingOngoing && !isCaptureOngoing && !isPmfiRunning) {
                 isCalibratingOngoing = true
                 setUiBusy(true)
-                if (sw4) triggerButton("SW4") // server still had preview on → ask it to stop
+                if (sw4) ensurePreviewOffAsync(1500) // server still had preview on → ask it to stop
                 clearPreviewSwitchAndCanvas()
                 vm.startCalibration(totalChannels = 16)
                 showCalUi(true)
             }
 
             // ---- 5) Preview switch & canvas sync (server is authoritative) ----
-            lastSw4FromServer = sw4
+            val nowMs = System.currentTimeMillis()
+            val pendingState = previewRequestedState
+            val pendingActive = pendingState != null && nowMs < previewRequestPendingUntil
+            if (pendingState != null) {
+                if (serverSw4 == pendingState) {
+                    clearPreviewRequest()
+                } else if (pendingActive) {
+                    sw4 = pendingState
+                }
+            }
+
+            lastSw4FromServer = serverSw4
             previewActive = sw4
 
             val localBusy =
                 (isCaptureOngoing || isCalibratingOngoing || isPmfiRunning || (vm.isCalibrating.value == true)) ||
                         pmfiNow || calNow || busyNow
 // If we’re idle and we wanted warming back, try once more immediately
-            if (!localBusy && wasPreviewOnBeforeAmsi && !lastSw4FromServer && !resumePreviewPending) {
+            if (!localBusy && wasPreviewOnBeforeAmsi && !lastSw4FromServer && !resumePreviewPending && !pendingActive) {
                 kickPreviewResume(maxMs = 2500L)
             }
 
@@ -1570,6 +1672,9 @@ class ControlFragment : Fragment() {
             }
 
             // ---- 6) Failsafe: if everything is idle, drop any lingering UI flags ----
+            if (now() < calStartGraceUntil) {
+                return@runOnUiThread
+            }
             if (!busyNow && !pmfiNow && !calNow) {
                 // Finish cal UI if it was showing
                 if (binding.calProgressBar.visibility == View.VISIBLE || binding.calProgressText.visibility == View.VISIBLE || isCalibratingOngoing || (vm.isCalibrating.value == true)) {
@@ -1621,6 +1726,7 @@ class ControlFragment : Fragment() {
         attachPreviewToggleListener()
 
         // Clear state + canvas
+        clearPreviewRequest()
         previewActive = false
         clearPreview()
     }
@@ -1641,6 +1747,52 @@ class ControlFragment : Fragment() {
             try {
                 val resp = PiApi.api.triggerButton(buttonId)
                 if (!resp.isSuccessful) toast("Trigger $buttonId failed: ${resp.code()}")
+            } catch (e: Exception) {
+                toast("Network error: ${e.localizedMessage}")
+            }
+        }
+    }
+
+    private suspend fun readUriText(uri: Uri): String = withContext(Dispatchers.IO) {
+        requireContext().contentResolver.openInputStream(uri)?.bufferedReader(Charsets.UTF_8).use {
+            it?.readText().orEmpty()
+        }
+    }
+
+    private fun queryDisplayName(uri: Uri): String? {
+        return requireContext().contentResolver.query(uri, null, null, null, null)?.use { cursor ->
+            val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+            if (nameIndex >= 0 && cursor.moveToFirst()) cursor.getString(nameIndex) else null
+        }
+    }
+
+    private fun sanitizeIniFilename(name: String?): String {
+        val raw = name?.trim().orEmpty().ifBlank { "pmfi_upload.ini" }
+        val cleaned = raw.replace(Regex("[^A-Za-z0-9._-]"), "_")
+        val lower = cleaned.lowercase(Locale.getDefault())
+        return when {
+            lower.endsWith(".ini") || lower.endsWith(".txt") -> cleaned
+            else -> "$cleaned.ini"
+        }
+    }
+
+    private fun uploadPmfiIniText(iniText: String, preferredName: String?) {
+        if (currentIp.isEmpty()) { toast("Set IP address first"); return }
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val iniFile = withContext(Dispatchers.IO) {
+                    val safeName = sanitizeIniFilename(preferredName)
+                    File(requireContext().cacheDir, safeName).apply { writeText(iniText) }
+                }
+                val resp = PiApi.api.iniUpload(PiApi.makeIniPart(iniFile))
+                if (resp.isSuccessful) {
+                    val body = resp.body()
+                    val name = body?.name ?: iniFile.name
+                    toast("INI uploaded: $name")
+                } else {
+                    val errBody = resp.errorBody()?.string().orEmpty()
+                    toast("INI upload failed: ${resp.code()} $errBody")
+                }
             } catch (e: Exception) {
                 toast("Network error: ${e.localizedMessage}")
             }
