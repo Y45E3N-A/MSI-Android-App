@@ -612,7 +612,7 @@ class GalleryFragment : Fragment() {
             existing to { newName: String -> renameSession(selSessionId, newName) }
         }
 
-    val input = android.widget.EditText(requireContext()).apply {
+        val input = android.widget.EditText(requireContext()).apply {
             hint = "Enter new name"
             setSingleLine(true)
             setText(currentTitle)
