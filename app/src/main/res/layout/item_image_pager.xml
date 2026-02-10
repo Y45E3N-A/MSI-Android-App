@@ -9,4 +9,17 @@
         android:layout_height="match_parent"
         android:adjustViewBounds="true"
         android:scaleType="fitCenter" />
+
+    <TextView
+        android:id="@+id/pager_image_title"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="top"
+        android:layout_marginTop="24dp"
+        android:background="#66000000"
+        android:ellipsize="none"
+        android:maxLines="10"
+        android:padding="12dp"
+        android:textColor="#FFFFFF"
+        android:textSize="14sp" />
 </FrameLayout>

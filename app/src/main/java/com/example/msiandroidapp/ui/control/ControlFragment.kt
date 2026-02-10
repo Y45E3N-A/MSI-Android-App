@@ -98,6 +98,12 @@ class ControlFragment : Fragment() {
     private var resumePreviewPending = false
     private var resumeJob: Job? = null
     private var calStartGraceUntil = 0L
+    private var calDarkFrameSeen = false
+    private var calExtraImagesExpected = 0
+    private var calDarkImagesUploaded = 0
+    private var calInfoLine: String = ""
+    private var calExpectedImages = 16
+    private var calTotalChannels = 16
 
     // Track preview state mirrored from server
     private var previewActive = false
@@ -191,6 +197,30 @@ class ControlFragment : Fragment() {
 
         // --- Calibration progress / complete / error from Pi ---
         // We'll inline what used to be hookCalibrationSocket(), but with the fixed cleanup-on-error
+        PiSocketManager.on("cal_plan") { payload ->
+            val j = payload as? JSONObject ?: return@on
+            val channels = j.optInt("channels", 16)
+            val darkExpected = j.optInt("dark_images_expected", 0)
+            val totalExpected = j.optInt("images_expected", channels + darkExpected)
+            if (!isAdded) return@on
+            requireActivity().runOnUiThread {
+                calTotalChannels = channels
+                vm.startCalibration(totalChannels = channels)
+                calDarkFrameSeen = darkExpected > 0
+                calExtraImagesExpected = darkExpected.coerceAtLeast(0)
+                calExpectedImages = totalExpected.coerceAtLeast(channels)
+                calDarkImagesUploaded = 0
+                binding.calProgressBar.max = calExpectedImages
+                if (binding.calProgressBar.visibility != View.VISIBLE) {
+                    binding.calProgressBar.visibility = View.VISIBLE
+                }
+                if (binding.calProgressText.visibility != View.VISIBLE) {
+                    binding.calProgressText.visibility = View.VISIBLE
+                }
+                binding.calProgressText.text = "Calibrating: 0/${binding.calProgressBar.max}"
+            }
+        }
+
         PiSocketManager.on("cal_progress") { payload ->
             val j = payload as? JSONObject ?: return@on
             vm.updateCalibrationProgress(
@@ -208,8 +238,7 @@ class ControlFragment : Fragment() {
                 vm.isCalibrating.value = true
                 setUiBusy(true)
 
-                binding.calProgressBar.max = vm.calTotalChannels.value ?: 16
-                binding.calProgressBar.progress = (vm.calChannelIndex.value ?: 0) + 1
+                refreshCalExpectedImages()
                 binding.calProgressBar.visibility = View.VISIBLE
                 binding.calProgressText.visibility = View.VISIBLE
 
@@ -218,11 +247,28 @@ class ControlFragment : Fragment() {
                 val p   = vm.calNormPrev.value
                 val n   = vm.calNormNew.value
 
-                binding.calProgressText.text =
-                    "Calibrating: ${binding.calProgressBar.progress}/${binding.calProgressBar.max} · " +
-                            "${wl ?: "-"}nm · avg=${ave?.let { String.format(Locale.US, "%.1f", it) } ?: "-"} · " +
+                calInfoLine =
+                    "${wl ?: "-"}nm · avg=${ave?.let { String.format(Locale.US, "%.1f", it) } ?: "-"} · " +
                             "norm ${p?.let { String.format(Locale.US, "%.2f", it) } ?: "-"}→" +
                             "${n?.let { String.format(Locale.US, "%.2f", it) } ?: "-"}"
+                updateCalProgressText()
+            }
+        }
+
+        PiSocketManager.on("cal_uploaded") { payload ->
+            val j = payload as? JSONObject ?: return@on
+            val imageType = j.optString("image_type", "")
+            val fileName = j.optString("file", "")
+            val isDark = imageType.equals("dark", true) || fileName.contains("dark", true)
+            if (isDark) calDarkFrameSeen = true
+            if (!isAdded) return@on
+            requireActivity().runOnUiThread {
+                // Count every uploaded calibration image (dark + final LED)
+                calDarkImagesUploaded += 1
+                refreshCalExpectedImages()
+                binding.calProgressBar.progress =
+                    (binding.calProgressBar.progress + 1).coerceAtMost(binding.calProgressBar.max)
+                updateCalProgressText()
             }
         }
 
@@ -236,6 +282,15 @@ class ControlFragment : Fragment() {
             }
             if (!isAdded) return@on
             requireActivity().runOnUiThread {
+                val images = j?.optInt("images", 16) ?: 16
+                val totalChannels = vm.calTotalChannels.value ?: calTotalChannels
+                if (images > totalChannels) {
+                    calDarkFrameSeen = true
+                    calExtraImagesExpected = (images - totalChannels).coerceAtLeast(0)
+                    refreshCalExpectedImages()
+                }
+                binding.calProgressBar.progress =
+                    binding.calProgressBar.progress.coerceAtMost(binding.calProgressBar.max)
                 calCooldownUntil = now() + 1_500L
                 endCalibrationUi("Calibration complete")
                 // Nudge a fresh state from Pi, but UI is already unlocked
@@ -657,6 +712,7 @@ class ControlFragment : Fragment() {
         binding.buttonStartAmsi.isEnabled = false
         binding.buttonCalibrate.isEnabled = false
         binding.buttonShutdown.isEnabled = false
+        binding.buttonFactoryReset.isEnabled = false
     }
 
     private val pmfiEditorLauncher = registerForActivityResult(
@@ -899,6 +955,7 @@ class ControlFragment : Fragment() {
             val gotLock = tryBeginBusy("cal"); if (!gotLock) { toast("Busy"); return@setOnClickListener }
 
             calStartGraceUntil = now() + 1200L
+            resetCalExpectedImages()
             vm.startCalibration(totalChannels = 16)
             showCalUi(true)
             binding.buttonCalibrate.isEnabled = false
@@ -953,11 +1010,21 @@ class ControlFragment : Fragment() {
         // Shutdown
         binding.buttonShutdown.setOnClickListener {
             if (currentIp.isEmpty()) { toast("Set IP address first"); return@setOnClickListener }
-            if (isPmfiRunning) { toast("PMFI running — wait for completion"); return@setOnClickListener }
+            if (isPmfiRunning) { toast("PMFI running – wait for completion"); return@setOnClickListener }
             AlertDialog.Builder(requireContext())
                 .setTitle("Shutdown System")
                 .setMessage("Are you sure you want to shut down the Pi and instrument?")
                 .setPositiveButton("Shutdown") { _, _ -> sendShutdown() }
+                .setNegativeButton("Cancel", null).show()
+        }
+
+        binding.buttonFactoryReset.setOnClickListener {
+            if (currentIp.isEmpty()) { toast("Set IP address first"); return@setOnClickListener }
+            if (isPmfiRunning) { toast("PMFI running – wait for completion"); return@setOnClickListener }
+            AlertDialog.Builder(requireContext())
+                .setTitle("Factory Reset")
+                .setMessage("This will abort current tasks and attempt recovery. Proceed?")
+                .setPositiveButton("Factory reset") { _, _ -> sendFactoryReset() }
                 .setNegativeButton("Cancel", null).show()
         }
 
@@ -1603,6 +1670,7 @@ class ControlFragment : Fragment() {
                 isPmfiRunning = false
                 setUiBusy(true)
                 ensurePreviewOffAsync(1500)
+                resetCalExpectedImages()
                 vm.startCalibration(totalChannels = 16)
                 showCalUi(true)
             }
@@ -1625,6 +1693,7 @@ class ControlFragment : Fragment() {
                 setUiBusy(true)
                 if (sw4) ensurePreviewOffAsync(1500) // server still had preview on → ask it to stop
                 clearPreviewSwitchAndCanvas()
+                resetCalExpectedImages()
                 vm.startCalibration(totalChannels = 16)
                 showCalUi(true)
             }
@@ -1870,6 +1939,18 @@ class ControlFragment : Fragment() {
             }
         }
     }
+
+    private fun sendFactoryReset() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val resp = PiApi.api.factoryReset()
+                if (resp.isSuccessful) toast("Factory reset command sent")
+                else toast("Failed: ${resp.code()}")
+            } catch (e: Exception) {
+                toast("Network error: ${e.localizedMessage}")
+            }
+        }
+    }
     // Robust AMSI size resolver with short retry window (up to ~2s).
     private suspend fun resolveAmsiHumanSize(runId: String): String? = withContext(Dispatchers.IO) {
         // Try a few times because DB/file I/O can lag the 16th image event
@@ -1985,17 +2066,47 @@ class ControlFragment : Fragment() {
 
     private fun showCalUi(show: Boolean) {
         if (show) {
-            binding.calProgressBar.max = 16
+            refreshCalExpectedImages()
             binding.calProgressBar.progress = 0
             binding.calProgressBar.visibility = View.VISIBLE
             binding.calProgressText.visibility = View.VISIBLE
-            binding.calProgressText.text = "Calibrating: 0/16"
+            updateCalProgressText()
         } else {
             binding.calProgressBar.progress = 0
             binding.calProgressBar.visibility = View.GONE
             binding.calProgressText.text = ""
             binding.calProgressText.visibility = View.GONE
         }
+    }
+
+    private fun resetCalExpectedImages() {
+        calDarkFrameSeen = false
+        calExtraImagesExpected = 0
+        calDarkImagesUploaded = 0
+        calInfoLine = ""
+        calTotalChannels = vm.calTotalChannels.value ?: 16
+        calExpectedImages = 16
+        refreshCalExpectedImages()
+    }
+
+    private fun refreshCalExpectedImages() {
+        val totalChannels = vm.calTotalChannels.value ?: calTotalChannels
+        calExpectedImages = if (calDarkFrameSeen) {
+            totalChannels + calExtraImagesExpected
+        } else {
+            totalChannels
+        }
+        binding.calProgressBar.max = calExpectedImages
+        if (binding.calProgressBar.progress > calExpectedImages) {
+            binding.calProgressBar.progress = calExpectedImages
+        }
+    }
+
+    private fun updateCalProgressText() {
+        val done = binding.calProgressBar.progress
+        val total = binding.calProgressBar.max
+        val info = if (calInfoLine.isNotBlank()) " · $calInfoLine" else ""
+        binding.calProgressText.text = "Calibrating: $done/$total$info"
     }
     // SUSPEND: turn preview off on the Pi and locally, wait briefly for ack.
     private suspend fun ensurePreviewOff(timeoutMs: Long = 2_000L) {
@@ -2087,6 +2198,10 @@ class ControlFragment : Fragment() {
         val canShutdown = connected && !globalBusy
         binding.buttonShutdown.isEnabled = canShutdown
         binding.buttonShutdown.alpha     = if (canShutdown) 1f else 0.4f
+
+        val canFactoryReset = connected && !globalBusy
+        binding.buttonFactoryReset.isEnabled = canFactoryReset
+        binding.buttonFactoryReset.alpha     = if (canFactoryReset) 1f else 0.4f
     }
 
 

@@ -522,6 +522,7 @@ class GalleryFragment : Fragment() {
 
     private fun openCalibration(profile: CalibrationProfile) {
         val wlToNorm = extractCalibrationMap(profile)
+        val wlToResults = parseCalResultsJson(profile.calResultsJson)
         val imagePaths = calibrationImagePaths(profile)
 
         val whenStr = profile.timestampStr.ifBlank {
@@ -538,15 +539,27 @@ class GalleryFragment : Fragment() {
             appendLine("When: $whenStr")
             if (!profile.summary.isNullOrBlank()) appendLine(profile.summary)
             appendLine()
-            appendLine("Wavelength (nm)    Norm")
-            appendLine("------------------------")
+            appendLine("Wavelength (nm)    Norm       AvgDN   Avg%")
+            appendLine("------------------------------------------")
         }
 
         val body = buildString {
             AMSI_WAVELENGTHS.forEach { wl ->
                 val norm = wlToNorm[wl]
                 val normStr = norm?.let { String.format(Locale.US, "%.6f", it) } ?: "—"
-                appendLine(String.format(Locale.US, "%-16s %8s", "${wl}nm", normStr))
+                val res = wlToResults[wl]
+                val avgDnStr = res?.avgDn?.let { String.format(Locale.US, "%6.1f", it) } ?: "—"
+                val avgPctStr = res?.avgPct?.let { String.format(Locale.US, "%5.1f", it) } ?: "—"
+                appendLine(
+                    String.format(
+                        Locale.US,
+                        "%-16s %8s  %6s  %5s",
+                        "${wl}nm",
+                        normStr,
+                        avgDnStr,
+                        avgPctStr
+                    )
+                )
             }
         }
 
@@ -585,12 +598,28 @@ class GalleryFragment : Fragment() {
     }
 
     private fun calibrationImagePaths(profile: CalibrationProfile): List<String> {
-        return try {
+        val paths = try {
             val arr = JSONArray(profile.imagePathsJson)
             List(arr.length()) { i -> arr.getString(i) }
         } catch (_: Exception) {
-            emptyList()
+            emptyList<String>()
         }
+        return paths.sortedWith(
+            compareBy<String> { path -> if (isDarkCalPath(path)) 0 else 1 }
+                .thenBy { path -> extractCalIndex(path) ?: Int.MAX_VALUE }
+                .thenBy { path -> File(path).name.lowercase(Locale.ROOT) }
+        )
+    }
+
+    private fun isDarkCalPath(path: String): Boolean {
+        val name = File(path).name.lowercase(Locale.ROOT)
+        return name.contains("dark")
+    }
+
+    private fun extractCalIndex(path: String): Int? {
+        val name = File(path).name
+        val match = Regex("(?i)cal_image_(\\d+)").find(name) ?: return null
+        return match.groupValues.getOrNull(1)?.toIntOrNull()
     }
 
 
@@ -921,6 +950,10 @@ class GalleryFragment : Fragment() {
             // ledNormsJson is already a JSON array string, so parse+re-put
             val arr = JSONArray(profile.ledNormsJson ?: "[]")
             put("led_norms", arr)
+
+            // per-channel calibration results (avg_dn / avg_pct etc.)
+            val resultsArr = JSONArray(profile.calResultsJson ?: "[]")
+            put("results", resultsArr)
         }
 
         FileOutputStream(file).use { it.write(root.toString(2).toByteArray()) }
@@ -1354,6 +1387,27 @@ class GalleryFragment : Fragment() {
             List(arr.length()) { idx -> arr.optDouble(idx) }
         } catch (e: Exception) {
             emptyList()
+        }
+    }
+
+    private data class CalResult(val avgDn: Double?, val avgPct: Double?)
+
+    private fun parseCalResultsJson(json: String?): Map<Int, CalResult> {
+        if (json.isNullOrBlank()) return emptyMap()
+        return try {
+            val arr = JSONArray(json)
+            val out = mutableMapOf<Int, CalResult>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val wl = obj.optInt("wavelength_nm", -1)
+                if (wl <= 0) continue
+                val avgDn = if (obj.has("avg_dn") && !obj.isNull("avg_dn")) obj.optDouble("avg_dn") else null
+                val avgPct = if (obj.has("avg_pct") && !obj.isNull("avg_pct")) obj.optDouble("avg_pct") else null
+                out[wl] = CalResult(avgDn, avgPct)
+            }
+            out
+        } catch (_: Exception) {
+            emptyMap()
         }
     }
 

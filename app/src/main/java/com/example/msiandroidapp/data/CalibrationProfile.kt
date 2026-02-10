@@ -13,6 +13,7 @@ data class CalibrationProfile(
     val timestampStr: String,
     val imagePathsJson: String,
     val ledNormsJson: String?,
+    val calResultsJson: String?,
     val targetDn: Double?,
     val envTempC: Double?,
     val envHumidity: Double?,

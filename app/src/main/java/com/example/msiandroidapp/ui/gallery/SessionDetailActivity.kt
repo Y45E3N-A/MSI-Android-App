@@ -15,6 +15,7 @@ import androidx.viewpager2.widget.ViewPager2
 import com.example.msiandroidapp.R
 import com.example.msiandroidapp.data.AppDatabase
 import java.io.File
+import java.util.Locale
 
 class SessionDetailActivity : AppCompatActivity() {
 
@@ -23,6 +24,10 @@ class SessionDetailActivity : AppCompatActivity() {
 
     private var sessionIdArg: Long = -1L
     private var imagePathsArg: ArrayList<String>? = null
+    private val amsiWavelengths = intArrayOf(
+        395, 415, 450, 470, 505, 528, 555, 570, 590, 610, 625, 640, 660, 730, 850, 880
+    )
+    private val calMetaCache = HashMap<String, CalMeta>()
 
     private val permissionRequester = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -101,11 +106,11 @@ class SessionDetailActivity : AppCompatActivity() {
                 }
 
                 // 1) Use DB paths when present
-                val urisFromDb: List<Uri> = s.imagePaths
-                    .map(::File)
-                    .filter { it.isFile && it.length() > 0 }
-                    .sortedBy { it.name.lowercase() }
-                    .map { Uri.fromFile(it) }
+                val urisFromDb: List<Uri> = buildSortedFiles(
+                    s.imagePaths
+                        .map(::File)
+                        .filter { it.isFile && it.length() > 0 }
+                ).map { Uri.fromFile(it) }
 
                 // 2) Fallback: scan the parent folder of the first path
                 val uris: List<Uri> = if (urisFromDb.isNotEmpty()) {
@@ -117,8 +122,7 @@ class SessionDetailActivity : AppCompatActivity() {
                             it.isFile && it.length() > 0 &&
                                     it.extension.lowercase() in setOf("png", "jpg", "jpeg", "webp")
                         }
-                        .sortedBy { it.name.lowercase() }
-                    files.map { Uri.fromFile(it) }
+                    buildSortedFiles(files).map { Uri.fromFile(it) }
                 }
 
                 if (uris.isEmpty()) {
@@ -128,7 +132,7 @@ class SessionDetailActivity : AppCompatActivity() {
 
                 emptyView.visibility = View.GONE
                 viewPager.visibility = View.VISIBLE
-                viewPager.adapter = ImagePagerAdapter(uris) // Adapter expects List<Uri>
+                viewPager.adapter = ImagePagerAdapter(buildImageItems(uris))
                 viewPager.offscreenPageLimit = 1
             }
     }
@@ -137,7 +141,7 @@ class SessionDetailActivity : AppCompatActivity() {
         val uris = imagePaths
             .map(::File)
             .filter { it.isFile && it.length() > 0 }
-            .sortedBy { it.name.lowercase() }
+            .let { buildSortedFiles(it) }
             .map { Uri.fromFile(it) }
 
         if (uris.isEmpty()) {
@@ -147,7 +151,7 @@ class SessionDetailActivity : AppCompatActivity() {
 
         emptyView.visibility = View.GONE
         viewPager.visibility = View.VISIBLE
-        viewPager.adapter = ImagePagerAdapter(uris)
+        viewPager.adapter = ImagePagerAdapter(buildImageItems(uris))
         viewPager.offscreenPageLimit = 1
     }
 
@@ -155,6 +159,173 @@ class SessionDetailActivity : AppCompatActivity() {
         viewPager.visibility = View.GONE
         emptyView.visibility = View.VISIBLE
         emptyView.text = message
+    }
+
+    private fun buildImageItems(uris: List<Uri>): List<ImagePagerAdapter.ImageItem> {
+        return uris.map { uri ->
+            val file = uri.path?.let(::File)
+            ImagePagerAdapter.ImageItem(
+                uri = uri,
+                title = file?.let { buildTitle(it) } ?: "Image"
+            )
+        }
+    }
+
+    private fun buildSortedFiles(files: List<File>): List<File> {
+        return files.sortedWith(
+            compareBy<File> { file -> if (isDarkImage(file.name)) 0 else 1 }
+                .thenBy { file -> extractImageIndex(file.name) ?: Int.MAX_VALUE }
+                .thenBy { file -> file.name.lowercase(Locale.ROOT) }
+        )
+    }
+
+    private fun buildTitle(file: File): String {
+        val name = file.name
+        val lower = name.lowercase(Locale.ROOT)
+        val parts = ArrayList<String>(4)
+
+        parts.add("File: $name")
+
+        val idx = extractImageIndex(name)
+        val wl = idx?.let { amsiWavelengths.getOrNull(it) }
+        if (wl != null) {
+            parts.add("Wavelength: $wl nm")
+        }
+        if (idx != null) {
+            parts.add("Index: $idx")
+        }
+
+        val type = when {
+            isDarkImage(lower) -> "Dark frame"
+            lower.startsWith("cal_") -> "Calibration"
+            lower.startsWith("image_") -> "AMSI"
+            lower.startsWith("frame_") -> "PMFI"
+            else -> "Image"
+        }
+        parts.add("Type: $type")
+
+        val sizeKb = (file.length() / 1024.0)
+        parts.add(String.format(Locale.US, "Size: %.1f KB", sizeKb))
+
+        // Calibration metadata overlay (exp/gain/avg/norm)
+        val runId = extractCalRunId(file.absolutePath)
+        val chIdx = extractChannelIndex(name)
+        if (runId != null && chIdx != null) {
+            val meta = loadCalMetaIfNeeded(runId, file.parentFile ?: file)
+            if (meta != null) {
+                val expUs = meta.expUsByChannel[chIdx]
+                val gain = meta.gainByChannel[chIdx]
+                if (expUs != null || gain != null) {
+                    val expStr = expUs?.let { "$it us" } ?: "—"
+                    val gainStr = gain?.let { it.toString() } ?: "—"
+                    parts.add("Exp: $expStr  Gain: $gainStr")
+                }
+
+                val norm = meta.norms?.getOrNull(chIdx)
+                val avg = meta.avgDnByChannel[chIdx]
+                val avgPct = meta.avgPctByChannel[chIdx]
+                if (norm != null || avg != null || avgPct != null) {
+                    val normStr = norm?.let { String.format(Locale.US, "%.4f", it) } ?: "—"
+                    val avgStr = avg?.let { String.format(Locale.US, "%.1f", it) } ?: "—"
+                    val pctStr = avgPct?.let { String.format(Locale.US, "%.1f%%", it) } ?: "—"
+                    parts.add("Norm: $normStr  Avg: $avgStr  ($pctStr)")
+                }
+            }
+        }
+
+        return parts.joinToString("\n")
+    }
+
+    private fun isDarkImage(name: String): Boolean {
+        return name.lowercase(Locale.ROOT).contains("dark")
+    }
+
+    private fun extractImageIndex(name: String): Int? {
+        val match = Regex("(?i)(?:cal_image_|image_|cal_channel_|frame_)(\\d+)").find(name)
+            ?: return null
+        return match.groupValues.getOrNull(1)?.toIntOrNull()
+    }
+
+    private data class CalMeta(
+        val norms: List<Double>?,
+        val avgDnByChannel: Map<Int, Double>,
+        val avgPctByChannel: Map<Int, Double>,
+        val expUsByChannel: Map<Int, Int>,
+        val gainByChannel: Map<Int, Int>
+    )
+
+    private fun loadCalMetaIfNeeded(runId: String, dir: File): CalMeta? {
+        calMetaCache[runId]?.let { return it }
+        val metaFile = dir.listFiles()
+            ?.firstOrNull { f ->
+                val name = f.name.lowercase(Locale.ROOT)
+                name.endsWith("_metadata.json") || (name.contains("metadata") && name.endsWith(".json"))
+            } ?: return null
+
+        return runCatching {
+            val root = org.json.JSONObject(metaFile.readText())
+            val normsArr = root.optJSONArray("led_norms")
+            val norms = normsArr?.let { arr ->
+                List(arr.length()) { i -> arr.optDouble(i) }
+            }
+
+            val avgDnByChannel = HashMap<Int, Double>()
+            val avgPctByChannel = HashMap<Int, Double>()
+            root.optJSONArray("results")?.let { results ->
+                for (i in 0 until results.length()) {
+                    val obj = results.optJSONObject(i) ?: continue
+                    val ch = obj.optInt("channel", -1)
+                    if (ch >= 0) {
+                        val avg = obj.optDouble("avg_dn", Double.NaN)
+                        if (!avg.isNaN()) avgDnByChannel[ch] = avg
+                        val pct = obj.optDouble("avg_pct", Double.NaN)
+                        if (!pct.isNaN()) avgPctByChannel[ch] = pct
+                    }
+                }
+            }
+
+            val expUsByChannel = HashMap<Int, Int>()
+            val gainByChannel = HashMap<Int, Int>()
+            root.optJSONArray("dark_images")?.let { darks ->
+                for (i in 0 until darks.length()) {
+                    val obj = darks.optJSONObject(i) ?: continue
+                    val ch = obj.optInt("channel", -1)
+                    if (ch >= 0) {
+                        val expUs = obj.optInt("exp_us", -1)
+                        val gain = obj.optInt("gain", -1)
+                        if (expUs >= 0) expUsByChannel[ch] = expUs
+                        if (gain >= 0) gainByChannel[ch] = gain
+                    }
+                }
+            }
+            root.optJSONArray("results")?.let { results ->
+                for (i in 0 until results.length()) {
+                    val obj = results.optJSONObject(i) ?: continue
+                    val ch = obj.optInt("channel", -1)
+                    if (ch >= 0) {
+                        val expUs = obj.optInt("exp_us", -1)
+                        val gain = obj.optInt("gain", -1)
+                        if (expUs >= 0 && !expUsByChannel.containsKey(ch)) expUsByChannel[ch] = expUs
+                        if (gain >= 0 && !gainByChannel.containsKey(ch)) gainByChannel[ch] = gain
+                    }
+                }
+            }
+
+            CalMeta(norms, avgDnByChannel, avgPctByChannel, expUsByChannel, gainByChannel)
+                .also { calMetaCache[runId] = it }
+        }.getOrNull()
+    }
+
+    private fun extractCalRunId(path: String): String? {
+        val m = Regex("(?i)/CAL/([^/]+)/").find(path.replace('\\', '/')) ?: return null
+        return m.groupValues.getOrNull(1)
+    }
+
+    private fun extractChannelIndex(name: String): Int? {
+        val dark = Regex("(?i)cal_dark_(\\d+)").find(name)
+        if (dark != null) return dark.groupValues.getOrNull(1)?.toIntOrNull()
+        val led = Regex("(?i)cal_image_(\\d+)").find(name)
+        return led?.groupValues?.getOrNull(1)?.toIntOrNull()
     }
 
     companion object {

@@ -24,7 +24,7 @@
             android:id="@+id/titleText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="MFi Android App v3.2.1"
+            android:text="MFi Android App v3.2.2"
             android:textSize="20sp"
             android:textStyle="normal"
             android:textColor="?attr/titleTextColor"
@@ -125,6 +125,17 @@
                     android:layout_height="wrap_content"
                     android:text="Shutdown"
                     android:contentDescription="Shutdown the instrument" />
+
+                <Space
+                    android:layout_width="12dp"
+                    android:layout_height="1dp" />
+
+                <Button
+                    android:id="@+id/buttonFactoryReset"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Factory Reset"
+                    android:contentDescription="Factory reset the instrument" />
 
                 <Space
                     android:layout_width="12dp"

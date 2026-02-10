@@ -258,12 +258,17 @@ class UploadServer(
             // and update/insert a CalibrationProfile row (or at least stash paths for it).
             if (mode == "cal") {
                 val calRunId = params["runId"] ?: sessionId      // e.g. "cal_20251028...."
-                val channelIdx = params["channel"]?.toIntOrNull() ?: -1
-                val wavelengthNm = params["wavelength"] ?: ""
+                val imageType = params["image_type"]?.lowercase(Locale.US)
+                val channelIdxFromParam = params["channel_index"]?.toIntOrNull()
+                val channelIdx = channelIdxFromParam ?: params["channel"]?.toIntOrNull() ?: -1
+                val wavelengthNm = if (imageType == "dark") "" else (params["wavelength"] ?: "")
 
-                val safeName = fileNameHint.ifBlank {
-                    if (channelIdx >= 0) "CAL_image_%02d.png".format(channelIdx)
-                    else "CAL_image_${System.currentTimeMillis()}.png"
+                val safeName = when {
+                    imageType == "dark" && channelIdx >= 0 -> "CAL_dark_%02d.png".format(channelIdx)
+                    imageType == "dark" -> "CAL_image_dark.png"
+                    fileNameHint.isNotBlank() -> fileNameHint
+                    channelIdx >= 0 -> "CAL_image_%02d.png".format(channelIdx)
+                    else -> "CAL_image_${System.currentTimeMillis()}.png"
                 }
 
                 val savedPath = handleCalPng(
@@ -419,9 +424,11 @@ class UploadServer(
             val root = org.json.JSONObject(txt)
             val modeFromJson = root.optString("mode").lowercase(Locale.ROOT)
             val ledNormsArr = if (root.has("led_norms")) root.optJSONArray("led_norms") else null
+            val calResultsArr = if (root.has("results")) root.optJSONArray("results") else null
             val targetDn    = if (root.has("target_dn")) root.optDouble("target_dn") else Double.NaN
 
             val ledNormsJsonStr = ledNormsArr?.toString()
+            val calResultsJsonStr = calResultsArr?.toString()
 
             val sessionIdFromJson = root.optString("session_id").takeIf { it.isNotBlank() }
             val env = root.optJSONObject("env")
@@ -432,6 +439,19 @@ class UploadServer(
 
             val runId = (hintedRunId ?: sessionIdFromJson)
                 ?: return badRequest("metadata.json missing sessionId/runId")
+
+            // Persist calibration metadata JSON alongside calibration images
+            if (modeFromJson == "cal") {
+                try {
+                    val calRoot = File(sessionsRoot, "CAL").apply { mkdirs() }
+                    val calDir  = File(calRoot, runId).apply { mkdirs() }
+                    val target  = File(calDir, "${runId}_metadata.json")
+                    target.writeText(txt)
+                    Log.i(TAG, "Calibration metadata saved: ${target.absolutePath}")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to save calibration metadata for runId=$runId", e)
+                }
+            }
 
             // Try to update now; if no row yet, cache and apply on insert
             scope.launch {
@@ -453,6 +473,7 @@ class UploadServer(
                         calDao.upsertCalibrationMetadata(
                             runId = runId,
                             ledNormsJson = ledNormsJsonStr,
+                            calResultsJson = calResultsJsonStr,
                             envTempC = tempC,
                             envHumidity = hum,
                             envTsUtc = tsUtc,
