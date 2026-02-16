@@ -24,7 +24,7 @@
             android:id="@+id/titleText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="MFi Android App v3.2.2"
+            android:text="MFi Android App v3.2.3"
             android:textSize="20sp"
             android:textStyle="normal"
             android:textColor="?attr/titleTextColor"

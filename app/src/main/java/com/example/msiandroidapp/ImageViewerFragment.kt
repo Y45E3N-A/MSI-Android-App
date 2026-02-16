@@ -144,9 +144,23 @@ class ImageViewerFragment : Fragment() {
             val fileName = file?.name ?: "Image"
             val titleLines = mutableListOf<String>()
             titleLines += "File: $fileName"
+            titleLines += "Frame: ${idx + 1}/${uris.size}"
 
             if (file != null) {
-                val runId = extractCalRunId(file.absolutePath)
+                val normalizedPath = file.absolutePath.replace('\\', '/')
+                val runId = extractCalRunId(normalizedPath) ?: extractPmfiRunId(normalizedPath)
+                if (runId != null) {
+                    titleLines += "RunId: $runId"
+                }
+
+                val pmfiSectionIndex = extractPmfiSectionIndex(normalizedPath)
+                val pmfiSectionLabel = extractPmfiSectionLabel(normalizedPath)
+                if (pmfiSectionIndex != null || !pmfiSectionLabel.isNullOrBlank()) {
+                    val secIdxStr = pmfiSectionIndex?.toString() ?: "-"
+                    val secLabelStr = pmfiSectionLabel?.ifBlank { "-" } ?: "-"
+                    titleLines += "Section: $secLabelStr  Index: $secIdxStr"
+                }
+
                 if (runId != null) {
                     val meta = loadCalMetaIfNeeded(runId, file.parentFile ?: file)
                     val chIdx = extractChannelIndex(fileName)
@@ -177,6 +191,24 @@ class ImageViewerFragment : Fragment() {
                 title = titleLines.joinToString("\n")
             )
         }
+    }
+
+    private fun extractPmfiRunId(path: String): String? {
+        val m = Regex("(?i)/PMFI/([^/]+?)(?:__[^/]+)?/").find(path) ?: return null
+        return m.groupValues.getOrNull(1)?.takeIf { it.isNotBlank() }
+    }
+
+    private fun extractPmfiSectionIndex(path: String): Int? {
+        val m = Regex("(?i)/section_(\\d+)(?:__[^/]+)?/").find(path) ?: return null
+        return m.groupValues.getOrNull(1)?.toIntOrNull()
+    }
+
+    private fun extractPmfiSectionLabel(path: String): String? {
+        val m = Regex("(?i)/section_\\d+__([^/]+)/").find(path) ?: return null
+        return m.groupValues.getOrNull(1)
+            ?.replace('_', ' ')
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
     }
 
     companion object {

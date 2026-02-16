@@ -18,7 +18,7 @@
         android:paddingEnd="16dp"
         android:paddingTop="12dp"
         android:paddingBottom="8dp"
-        app:title="MFi Android App v3.2.2"
+        app:title="MFi Android App v3.2.3"
         app:titleTextAppearance="@style/GalleryTitleText"
         app:titleTextColor="?attr/titleTextColor"
         app:popupTheme="@style/ThemeOverlay.MaterialComponents.Light"

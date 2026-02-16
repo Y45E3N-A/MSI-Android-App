@@ -1003,7 +1003,7 @@ class GalleryFragment : Fragment() {
         fun fromDate(ms: Long): Pair<String, String> {
             val z = java.util.TimeZone.getTimeZone("Europe/London")
             val dFmt = java.text.SimpleDateFormat("dd_MM_yyyy", java.util.Locale.US).apply { timeZone = z }
-            val tFmt = java.text.SimpleDateFormat("HH_mm_ss", java.util.Locale.US).apply { timeZone = z }
+            val tFmt = java.text.SimpleDateFormat("HH_mm", java.util.Locale.US).apply { timeZone = z }
             val dt = java.util.Date(ms)
             return dFmt.format(dt) to tFmt.format(dt)
         }
@@ -1031,45 +1031,27 @@ class GalleryFragment : Fragment() {
 
     private fun buildFolderName(session: Session): String {
         val (d, t) = datePartsForName(session)
-
-        val loc = session.location.trim().ifEmpty { "UnknownLoc" }
+        val loc = compactLocationForName(session.location)
 
         val custom = prefs.getString(spKeySession(session.id), "")?.trim().orEmpty()
         val baseTitle = if (custom.isNotEmpty()) {
             sanitizeName(custom)
-        } else {
-            sanitizeName(defaultSessionTitle(session))
-        }
+        } else ""
 
-        val envSlug = run {
-            val temp = session.envTempC?.let { String.format(Locale.US, "%.1f", it) } ?: "NA"
-            val rh   = session.envHumidity?.let { String.format(Locale.US, "%.0f", it) } ?: "NA"
-            "Env_T_${temp}C__RH_${rh}pc"
-        }
+        val temp = session.envTempC?.let { String.format(Locale.US, "%.0f", it) } ?: "NA"
+        val rh = session.envHumidity?.let { String.format(Locale.US, "%.0f", it) } ?: "NA"
 
-        val kindTag = folderKindTagFor(session) // "PMFI", "AMSI", ...
+        val title = if (baseTitle.isNotBlank()) baseTitle else sanitizeName(defaultSessionTitle(session))
+        val kind = folderKindTagFor(session)
 
-        // >>> THIS IS THE IMPORTANT CHANGE <<<
-        // For PMFI, we build a filename-safe LED/INI section slug with hash stripped.
-        val pmfiSlugForFile = if (session.isPMFI()) {
-            pmfiInfoForFilename(session).takeIf { it.isNotBlank() }
-        } else null
-
-        // Final shape in the ZIP:
-        // [PMFI]_Session_149__Date_28_10_2025__Time_14_59_56__Loc_Stretford__Greater_Manchester...__INI_leafscan_v4__Section_000__sec_test_sine_part_001__Env_T_24.6C__RH_71pc
-        // (No stupid giant hash anymore.)
         return buildString {
-            append("[").append(kindTag).append("]_")
-            append(baseTitle)
-            append("__Date_").append(d)
-            append("__Time_").append(t)
-            append("__Loc_").append(sanitizeName(loc))
-
-            if (pmfiSlugForFile != null) {
-                append("__").append(pmfiSlugForFile)
-            }
-
-            append("__").append(envSlug)
+            append(kind).append("__")
+            append("nam_").append(title)
+            append("__dat_").append(d)
+            append("__tim_").append(t)
+            append("__loc_").append(loc)
+            append("__tmp_").append(temp)
+            append("__rhu_").append(rh)
         }
     }
 
@@ -1098,7 +1080,7 @@ class GalleryFragment : Fragment() {
                         buildAmsiImageNameForShare(idx)
                     } else {
                         // PMFI / arbitrary count
-                        "frame_${String.format(Locale.US, "%04d", idx + 1)}.png"
+                        "img_${String.format(Locale.US, "%04d", idx + 1)}.png"
                     }
 
                     // copy + (light) EXIF tagging into a temp file
@@ -1119,7 +1101,7 @@ class GalleryFragment : Fragment() {
 
     private fun buildAmsiImageNameForShare(index: Int): String {
         val wl = wavelengthForIndex(index)
-        return if (wl != null) "Wavelength_${wl}nm.png" else "Wavelength_unknown.png"
+        return if (wl != null) "wl_${wl}.png" else "img_${String.format(Locale.US, "%04d", index + 1)}.png"
     }
 
     private fun stampExifToCopy(
@@ -1309,8 +1291,15 @@ class GalleryFragment : Fragment() {
 
     private fun buildCalibrationZip(profile: CalibrationProfile): File? = runCatching {
         val cacheDir = File(requireContext().cacheDir, "shares").apply { mkdirs() }
-
         val safeTitle = sanitizeName(displayNameFor(profile))
+
+        // Parse image paths list from profile.imagePathsJson
+        val imagePaths = try {
+            val arr = org.json.JSONArray(profile.imagePathsJson ?: "[]")
+            List(arr.length()) { i -> arr.getString(i) }
+        } catch (e: Exception) {
+            emptyList<String>()
+        }
 
         val zipFile = File(
             cacheDir,
@@ -1318,22 +1307,35 @@ class GalleryFragment : Fragment() {
         )
 
         ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
-            // NEW: folder name inside ZIP
-            // Example:
-            // [CALIBRATION]_Calibration_12345__Run_cal_20251028_1420
             val folderName = buildString {
-                append("[CALIBRATION]_")
-                append(safeTitle)
-                append("__Run_")
-                append(sanitizeName(profile.runId))
-            }
+                val (d, t) = datePartsForCalibration(profile)
+                val loc = buildCalLocationPart(imagePaths)
+                val temp = profile.envTempC?.let { String.format(Locale.US, "%.0f", it) } ?: "NA"
+                val rh = profile.envHumidity?.let { String.format(Locale.US, "%.0f", it) } ?: "NA"
+                val title = if (safeTitle.isNotBlank()) safeTitle else "Calibration"
 
-            // Parse image paths list from profile.imagePathsJson
-            val imagePaths = try {
-                val arr = org.json.JSONArray(profile.imagePathsJson ?: "[]")
-                List(arr.length()) { i -> arr.getString(i) }
-            } catch (e: Exception) {
-                emptyList<String>()
+                append("CAL__")
+                append("nam_").append(title)
+                append("__dat_").append(d)
+                append("__tim_").append(t)
+                append("__loc_").append(loc)
+                append("__tmp_").append(temp)
+                append("__rhu_").append(rh)
+            }
+            val expUsByChannel = buildCalExposureUsByChannel(profile, imagePaths)
+            val usedNames = hashSetOf<String>()
+
+            fun uniqueExportName(name: String): String {
+                if (usedNames.add(name)) return name
+                val dot = name.lastIndexOf('.')
+                val base = if (dot > 0) name.substring(0, dot) else name
+                val ext = if (dot > 0) name.substring(dot) else ""
+                var i = 2
+                while (true) {
+                    val candidate = "${base}_$i$ext"
+                    if (usedNames.add(candidate)) return candidate
+                    i++
+                }
             }
 
             imagePaths
@@ -1341,7 +1343,12 @@ class GalleryFragment : Fragment() {
                 .filter { it.exists() }
                 .sortedBy { it.name.lowercase(Locale.ROOT) }
                 .forEachIndexed { idx, src ->
-                    val prettyName = buildCalibrationImageNameForShare(profile, idx, src)
+                    val rawName = buildCalibrationImageNameForShare(
+                        index = idx,
+                        fileOnDisk = src,
+                        expUsByChannel = expUsByChannel
+                    )
+                    val prettyName = uniqueExportName(rawName)
 
                     FileInputStream(src).use { fis ->
                         zos.putNextEntry(ZipEntry("$folderName/$prettyName"))
@@ -1354,16 +1361,59 @@ class GalleryFragment : Fragment() {
         zipFile
     }.getOrNull()
 
+    private fun datePartsForCalibration(profile: CalibrationProfile): Pair<String, String> {
+        fun fromMillis(ms: Long): Pair<String, String> {
+            val z = java.util.TimeZone.getTimeZone("Europe/London")
+            val dFmt = java.text.SimpleDateFormat("dd_MM_yyyy", java.util.Locale.US).apply { timeZone = z }
+            val tFmt = java.text.SimpleDateFormat("HH_mm", java.util.Locale.US).apply { timeZone = z }
+            val dt = java.util.Date(ms)
+            return dFmt.format(dt) to tFmt.format(dt)
+        }
 
-    // Optionally smarter names if you stored wavelength/channel mapping in the profile
+        if (profile.completedAtMillis > 0L) {
+            return fromMillis(profile.completedAtMillis)
+        }
+
+        val raw = profile.timestampStr?.trim().orEmpty()
+        if (raw.isNotEmpty()) {
+            val fmts = listOf(
+                java.text.SimpleDateFormat("dd-MM-yyyy HH:mm:ss", Locale.getDefault()),
+                java.text.SimpleDateFormat("dd-MM-yyyy | HH:mm", Locale.getDefault())
+            )
+            fmts.firstNotNullOfOrNull { fmt ->
+                runCatching { fmt.parse(raw)?.time }.getOrNull()
+            }?.let { return fromMillis(it) }
+        }
+
+        return fromMillis(System.currentTimeMillis())
+    }
+
+    // Build a filename with accurate calibration metadata (type + channel + wavelength)
     private fun buildCalibrationImageNameForShare(
-        profile: CalibrationProfile,
         index: Int,
-        fileOnDisk: File
+        fileOnDisk: File,
+        expUsByChannel: Map<Int, Int>
     ): String {
-        // Try to include wavelength if we have it, else fall back to CAL_image_xx.png
-        // You can extend CalibrationProfile to hold per-channel wavelength info.
-        return "cal_channel_${String.format(Locale.US, "%02d", index)}.png"
+        val name = fileOnDisk.name
+        val lower = name.lowercase(Locale.ROOT)
+
+        val darkMatch = Regex("(?i)cal_dark_(\\d+)").find(name)
+        val ledMatch = Regex("(?i)cal_image_(\\d+)").find(name)
+
+        val isDark = darkMatch != null || lower.contains("image_dark") || lower.contains("cal_dark")
+        val channelIdx = darkMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: ledMatch?.groupValues?.getOrNull(1)?.toIntOrNull()
+            ?: Regex("(?i)dark_(\\d+)").find(name)?.groupValues?.getOrNull(1)?.toIntOrNull()
+
+        val effectiveIdx = channelIdx ?: index
+        val wl = wavelengthForIndex(effectiveIdx)
+        val wlPart = wl?.toString() ?: "unk"
+
+        if (isDark) {
+            val expPart = expUsByChannel[effectiveIdx]?.toString() ?: "na"
+            return "dark_wl_${wlPart}_exp_${expPart}.png"
+        }
+        return "wl_${wlPart}.png"
     }
 
 
@@ -1410,6 +1460,108 @@ class GalleryFragment : Fragment() {
             emptyMap()
         }
     }
+
+    private fun parseCalExposureUsByChannel(json: String?): Map<Int, Int> {
+        if (json.isNullOrBlank()) return emptyMap()
+        return try {
+            val arr = JSONArray(json)
+            val out = mutableMapOf<Int, Int>()
+            for (i in 0 until arr.length()) {
+                val obj = arr.optJSONObject(i) ?: continue
+                val ch = obj.optInt("channel", -1)
+                val expUs = obj.optInt("exp_us", -1)
+                if (ch >= 0 && expUs > 0) out[ch] = expUs
+            }
+            out
+        } catch (_: Exception) {
+            emptyMap()
+        }
+    }
+
+    private fun buildCalExposureUsByChannel(
+        profile: CalibrationProfile,
+        imagePaths: List<String>
+    ): Map<Int, Int> {
+        val out = mutableMapOf<Int, Int>()
+
+        // 1) Preferred source: on-disk metadata JSON beside calibration images.
+        // This matches how SessionDetail/ImageViewer derive exposure info.
+        val metaFile = findCalibrationMetadataFile(imagePaths)
+        if (metaFile != null) {
+            runCatching {
+                val root = JSONObject(metaFile.readText())
+                root.optJSONArray("dark_images")?.let { darks ->
+                    for (i in 0 until darks.length()) {
+                        val obj = darks.optJSONObject(i) ?: continue
+                        val ch = obj.optInt("channel", -1)
+                        val expUs = obj.optInt("exp_us", -1)
+                        if (ch >= 0 && expUs > 0) out[ch] = expUs
+                    }
+                }
+                // fallback source inside the same metadata json
+                root.optJSONArray("results")?.let { results ->
+                    for (i in 0 until results.length()) {
+                        val obj = results.optJSONObject(i) ?: continue
+                        val ch = obj.optInt("channel", -1)
+                        val expUs = obj.optInt("exp_us", -1)
+                        if (ch >= 0 && expUs > 0 && !out.containsKey(ch)) out[ch] = expUs
+                    }
+                }
+            }
+        }
+
+        // 2) DB fallback (what we already persisted in calibration profile).
+        if (out.isEmpty()) {
+            out.putAll(parseCalExposureUsByChannel(profile.calResultsJson))
+        }
+
+        return out
+    }
+
+    private fun findCalibrationMetadataFile(imagePaths: List<String>): File? {
+        val dir = imagePaths
+            .asSequence()
+            .map { File(it) }
+            .firstOrNull { it.exists() }
+            ?.parentFile
+            ?: return null
+        return dir.listFiles()
+            ?.firstOrNull { f ->
+                val n = f.name.lowercase(Locale.ROOT)
+                n.endsWith("_metadata.json") || (n.contains("metadata") && n.endsWith(".json"))
+            }
+    }
+
+    private fun buildCalLocationPart(imagePaths: List<String>): String {
+        val metaFile = findCalibrationMetadataFile(imagePaths) ?: return "unk"
+        val rawLoc = runCatching {
+            val root = JSONObject(metaFile.readText())
+            listOf("location", "locationStr", "location_str", "loc")
+                .firstNotNullOfOrNull { key ->
+                    root.optString(key).trim().takeIf { it.isNotBlank() && !it.equals("null", true) }
+                }
+        }.getOrNull().orEmpty()
+        return compactLocationForName(rawLoc)
+    }
+
+    private fun compactLocationForName(raw: String): String {
+        val s = raw.trim()
+        if (s.isBlank()) return "unk"
+        val nums = Regex("[-+]?\\d+(?:\\.\\d+)?")
+            .findAll(s)
+            .map { it.value }
+            .toList()
+        if (nums.size >= 2) {
+            return sanitizeLocationName("${nums[0]},${nums[1]}")
+        }
+        if (nums.size == 1) {
+            return sanitizeLocationName(nums[0])
+        }
+        return "unk"
+    }
+
+    private fun sanitizeLocationName(s: String): String =
+        s.replace(Regex("[^A-Za-z0-9_\\-., ]"), "_").replace("\\s+".toRegex(), "_")
 
     private fun refreshDisplayNameForId(selId: Long) {
         // sessions (unchanged)

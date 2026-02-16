@@ -14,6 +14,7 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.viewpager2.widget.ViewPager2
 import com.example.msiandroidapp.R
 import com.example.msiandroidapp.data.AppDatabase
+import com.example.msiandroidapp.data.Session
 import java.io.File
 import java.util.Locale
 
@@ -28,6 +29,11 @@ class SessionDetailActivity : AppCompatActivity() {
         395, 415, 450, 470, 505, 528, 555, 570, 590, 610, 625, 640, 660, 730, 850, 880
     )
     private val calMetaCache = HashMap<String, CalMeta>()
+    private data class PagerContext(
+        val runId: String?,
+        val sectionLabel: String?,
+        val sectionIndex: Int?
+    )
 
     private val permissionRequester = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -132,7 +138,12 @@ class SessionDetailActivity : AppCompatActivity() {
 
                 emptyView.visibility = View.GONE
                 viewPager.visibility = View.VISIBLE
-                viewPager.adapter = ImagePagerAdapter(buildImageItems(uris))
+                val ctx = PagerContext(
+                    runId = s.runId,
+                    sectionLabel = s.label,
+                    sectionIndex = s.sectionIndex
+                )
+                viewPager.adapter = ImagePagerAdapter(buildImageItems(uris, session = s, pagerContext = ctx))
                 viewPager.offscreenPageLimit = 1
             }
     }
@@ -151,7 +162,7 @@ class SessionDetailActivity : AppCompatActivity() {
 
         emptyView.visibility = View.GONE
         viewPager.visibility = View.VISIBLE
-        viewPager.adapter = ImagePagerAdapter(buildImageItems(uris))
+        viewPager.adapter = ImagePagerAdapter(buildImageItems(uris, session = null, pagerContext = null))
         viewPager.offscreenPageLimit = 1
     }
 
@@ -161,12 +172,25 @@ class SessionDetailActivity : AppCompatActivity() {
         emptyView.text = message
     }
 
-    private fun buildImageItems(uris: List<Uri>): List<ImagePagerAdapter.ImageItem> {
-        return uris.map { uri ->
+    private fun buildImageItems(
+        uris: List<Uri>,
+        session: Session?,
+        pagerContext: PagerContext?
+    ): List<ImagePagerAdapter.ImageItem> {
+        val totalFrames = uris.size
+        return uris.mapIndexed { frameIdx, uri ->
             val file = uri.path?.let(::File)
             ImagePagerAdapter.ImageItem(
                 uri = uri,
-                title = file?.let { buildTitle(it) } ?: "Image"
+                title = file?.let {
+                    buildTitle(
+                        file = it,
+                        frameIdx = frameIdx,
+                        totalFrames = totalFrames,
+                        session = session,
+                        pagerContext = pagerContext
+                    )
+                } ?: "Image"
             )
         }
     }
@@ -179,12 +203,40 @@ class SessionDetailActivity : AppCompatActivity() {
         )
     }
 
-    private fun buildTitle(file: File): String {
+    private fun buildTitle(
+        file: File,
+        frameIdx: Int,
+        totalFrames: Int,
+        session: Session?,
+        pagerContext: PagerContext?
+    ): String {
         val name = file.name
         val lower = name.lowercase(Locale.ROOT)
-        val parts = ArrayList<String>(4)
+        val parts = ArrayList<String>(8)
 
         parts.add("File: $name")
+        parts.add("Frame: ${frameIdx + 1}/$totalFrames")
+
+        val normalizedPath = file.absolutePath.replace('\\', '/')
+        val runId = pagerContext?.runId
+            ?.takeIf { it.isNotBlank() }
+            ?: extractCalRunId(normalizedPath)
+            ?: extractPmfiRunId(normalizedPath)
+        if (runId != null) {
+            parts.add("RunId: $runId")
+        }
+
+        val pmfiSectionIndex = pagerContext?.sectionIndex
+            ?: session?.takeIf { it.type.equals("PMFI", ignoreCase = true) }?.sectionIndex
+            ?: extractPmfiSectionIndex(normalizedPath)
+        val pmfiSectionLabel = pagerContext?.sectionLabel
+            ?: session?.takeIf { it.type.equals("PMFI", ignoreCase = true) }?.label
+            ?: extractPmfiSectionLabel(normalizedPath)
+        if (pmfiSectionIndex != null || !pmfiSectionLabel.isNullOrBlank()) {
+            val secIdxStr = pmfiSectionIndex?.toString() ?: "-"
+            val secLabelStr = pmfiSectionLabel?.ifBlank { "-" } ?: "-"
+            parts.add("Section: $secLabelStr  Index: $secIdxStr")
+        }
 
         val idx = extractImageIndex(name)
         val wl = idx?.let { amsiWavelengths.getOrNull(it) }
@@ -208,10 +260,11 @@ class SessionDetailActivity : AppCompatActivity() {
         parts.add(String.format(Locale.US, "Size: %.1f KB", sizeKb))
 
         // Calibration metadata overlay (exp/gain/avg/norm)
-        val runId = extractCalRunId(file.absolutePath)
+        val calRunId = extractCalRunId(file.absolutePath)
         val chIdx = extractChannelIndex(name)
-        if (runId != null && chIdx != null) {
-            val meta = loadCalMetaIfNeeded(runId, file.parentFile ?: file)
+        val isDark = isDarkImage(name)
+        if (calRunId != null && chIdx != null) {
+            val meta = loadCalMetaIfNeeded(calRunId, file.parentFile ?: file)
             if (meta != null) {
                 val expUs = meta.expUsByChannel[chIdx]
                 val gain = meta.gainByChannel[chIdx]
@@ -221,14 +274,16 @@ class SessionDetailActivity : AppCompatActivity() {
                     parts.add("Exp: $expStr  Gain: $gainStr")
                 }
 
-                val norm = meta.norms?.getOrNull(chIdx)
-                val avg = meta.avgDnByChannel[chIdx]
-                val avgPct = meta.avgPctByChannel[chIdx]
-                if (norm != null || avg != null || avgPct != null) {
-                    val normStr = norm?.let { String.format(Locale.US, "%.4f", it) } ?: "—"
-                    val avgStr = avg?.let { String.format(Locale.US, "%.1f", it) } ?: "—"
-                    val pctStr = avgPct?.let { String.format(Locale.US, "%.1f%%", it) } ?: "—"
-                    parts.add("Norm: $normStr  Avg: $avgStr  ($pctStr)")
+                if (!isDark) {
+                    val norm = meta.norms?.getOrNull(chIdx)
+                    val avg = meta.avgDnByChannel[chIdx]
+                    val avgPct = meta.avgPctByChannel[chIdx]
+                    if (norm != null || avg != null || avgPct != null) {
+                        val normStr = norm?.let { String.format(Locale.US, "%.4f", it) } ?: "—"
+                        val avgStr = avg?.let { String.format(Locale.US, "%.1f", it) } ?: "—"
+                        val pctStr = avgPct?.let { String.format(Locale.US, "%.1f%%", it) } ?: "—"
+                        parts.add("Norm: $normStr  Avg: $avgStr  ($pctStr)")
+                    }
                 }
             }
         }
@@ -319,6 +374,24 @@ class SessionDetailActivity : AppCompatActivity() {
     private fun extractCalRunId(path: String): String? {
         val m = Regex("(?i)/CAL/([^/]+)/").find(path.replace('\\', '/')) ?: return null
         return m.groupValues.getOrNull(1)
+    }
+
+    private fun extractPmfiRunId(path: String): String? {
+        val m = Regex("(?i)/PMFI/([^/]+?)(?:__[^/]+)?/").find(path) ?: return null
+        return m.groupValues.getOrNull(1)?.takeIf { it.isNotBlank() }
+    }
+
+    private fun extractPmfiSectionIndex(path: String): Int? {
+        val m = Regex("(?i)/section_(\\d+)(?:__[^/]+)?/").find(path) ?: return null
+        return m.groupValues.getOrNull(1)?.toIntOrNull()
+    }
+
+    private fun extractPmfiSectionLabel(path: String): String? {
+        val m = Regex("(?i)/section_\\d+__([^/]+)/").find(path) ?: return null
+        return m.groupValues.getOrNull(1)
+            ?.replace('_', ' ')
+            ?.trim()
+            ?.takeIf { it.isNotBlank() }
     }
 
     private fun extractChannelIndex(name: String): Int? {
