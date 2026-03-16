@@ -7,7 +7,7 @@ import androidx.room.RoomDatabase
 import androidx.room.TypeConverters
 
 /**
- * AppDatabase (stable baseline v2).
+ * AppDatabase (stable baseline v3).
  *
  * Entities:
  *  - Session: AMSI/PMFI run/section (images + metadata)
@@ -23,7 +23,7 @@ import androidx.room.TypeConverters
         Session::class,
         CalibrationProfile::class
     ],
-    version = 2,
+    version = 3,
     exportSchema = true
 )
 @TypeConverters(Converters::class)
@@ -36,7 +36,7 @@ abstract class AppDatabase : RoomDatabase() {
         @Volatile
         private var INSTANCE: AppDatabase? = null
 
-        private const val DB_NAME = "gallery_db_v2" // new file name; guarantees a clean open after schema changes
+        private const val DB_NAME = "gallery_db_v3" // new file name; guarantees a clean open after schema changes
 
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {

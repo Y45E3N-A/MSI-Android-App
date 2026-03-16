@@ -79,6 +79,11 @@ interface PiApiService {
     @POST("/shutdown")
     suspend fun shutdownSystem(): Response<ResponseBody>
 
+    @POST("/factory_reset")
+    suspend fun factoryReset(
+        @Query("reason") reason: String = "factory reset"
+    ): Response<ResponseBody>
+
     @POST("/trigger")
     suspend fun triggerButton(@Query("button") buttonId: String): Response<ResponseBody> // SW2/SW3/SW4
     @POST("/abort")

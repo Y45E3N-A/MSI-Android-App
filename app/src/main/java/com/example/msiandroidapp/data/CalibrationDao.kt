@@ -81,6 +81,7 @@ interface CalibrationDao {
             imagePathsJson = mutableListToJsonArray(paths),
 
             ledNormsJson = existing?.ledNormsJson,
+            calResultsJson = existing?.calResultsJson,
             targetDn     = existing?.targetDn,
             envTempC     = existing?.envTempC,
             envHumidity  = existing?.envHumidity,
@@ -110,6 +111,7 @@ interface CalibrationDao {
     suspend fun upsertCalibrationMetadata(
         runId: String,
         ledNormsJson: String?,        // e.g. "[0.5,0.48,...]"
+        calResultsJson: String?,      // per-channel results from metadata.json
         envTempC: Double?,
         envHumidity: Double?,
         envTsUtc: String?,
@@ -148,6 +150,7 @@ interface CalibrationDao {
             imagePathsJson = pathsJson,
 
             ledNormsJson = ledNormsJson ?: existing?.ledNormsJson,
+            calResultsJson = calResultsJson ?: existing?.calResultsJson,
             targetDn     = targetDn     ?: existing?.targetDn,
             envTempC     = envTempC     ?: existing?.envTempC,
             envHumidity  = envHumidity  ?: existing?.envHumidity,

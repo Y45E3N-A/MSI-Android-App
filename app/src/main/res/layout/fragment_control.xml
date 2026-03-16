@@ -131,6 +131,17 @@
                     android:layout_height="1dp" />
 
                 <Button
+                    android:id="@+id/buttonFactoryReset"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:text="Factory Reset"
+                    android:contentDescription="Factory reset the instrument" />
+
+                <Space
+                    android:layout_width="12dp"
+                    android:layout_height="1dp" />
+
+                <Button
                     android:id="@+id/buttonCalibrate"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"

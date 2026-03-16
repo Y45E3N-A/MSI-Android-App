@@ -4,6 +4,7 @@ import android.content.Context
 import android.util.Log
 import com.example.msiandroidapp.data.AppDatabase
 import com.example.msiandroidapp.data.Session
+import com.example.msiandroidapp.util.PngHeaderReader
 import com.example.msiandroidapp.util.UploadProgressBus
 import com.google.android.gms.location.LocationServices
 import fi.iki.elonen.NanoHTTPD
@@ -30,10 +31,10 @@ import java.util.zip.ZipFile
  *   GET  /debug                      -> text summary of sessions on disk (dev aid)
  *   POST /upload[?sessionId=...]
  *          [&mode=pmfi]
- *          [&section=sectionName]    -> accepts AMSI (PNG stream) or PMFI ZIP/PNG
+ *          [&section=sectionName]    -> accepts AMSI (PNG/DNG stream) or PMFI ZIP/PNG
  *
  * Modes:
- *  - AMSI (default): expects 16 PNGs per sessionId. Auto-finalises at 16.
+ *  - AMSI (default): expects 16 image uploads per sessionId. Auto-finalises at 16.
  *  - PMFI ZIP (preferred): a ZIP for a single section/wavelength block (&mode=pmfi).
  *    We unzip the PNGs, merge them into that section’s row in Room
  *    (1 DB row per (runId, sectionIndex)), and broadcast progress.
@@ -106,6 +107,13 @@ class UploadServer(
     // Access request params in helpers (populated per request)
     private val lastRequestParams = object : ThreadLocal<Map<String, String>>() {}
 
+    private data class UploadImageSpec(
+        val sourceFormat: String,
+        val sourceBitDepth: Int?,
+        val renderFormat: String,
+        val saveAsPng: Boolean
+    )
+
     // --------------------------------------------------------------------------------------------
     // Lifecycle
     // --------------------------------------------------------------------------------------------
@@ -175,6 +183,7 @@ class UploadServer(
                 ?: params["filename"]
                 ?: params["file"]
                 ?: "upload.bin"
+            val imageSpec = buildUploadImageSpec(params, fileNameHint)
 
             val mode = (params["mode"] ?: "amsi").lowercase(Locale.US)
             val sessionId = params["sessionId"] ?: params["sid"] ?: UUID.randomUUID().toString()
@@ -226,11 +235,8 @@ class UploadServer(
                 val uploadsRoot = File(context.filesDir, "uploads").apply { mkdirs() }
                 val effectiveRunId = (params["runId"] ?: sessionId)
                 val destDir = File(uploadsRoot, "pmfi/$effectiveRunId").apply { mkdirs() }
-                val destFile = File(destDir, "upload_${System.currentTimeMillis()}.png")
-
-                // Save file
-                tmpFile.copyTo(destFile, overwrite = true)
-                tmpFile.delete()
+                val destFile = File(destDir, normalizedPngFilename("upload_${System.currentTimeMillis()}.png"))
+                persistUploadedImage(tmpFile, destFile, imageSpec)
 
                 // Index/insert one-by-one
                 insertSessionFromUpload(
@@ -258,18 +264,24 @@ class UploadServer(
             // and update/insert a CalibrationProfile row (or at least stash paths for it).
             if (mode == "cal") {
                 val calRunId = params["runId"] ?: sessionId      // e.g. "cal_20251028...."
-                val channelIdx = params["channel"]?.toIntOrNull() ?: -1
-                val wavelengthNm = params["wavelength"] ?: ""
+                val imageType = params["image_type"]?.lowercase(Locale.US)
+                val channelIdxFromParam = params["channel_index"]?.toIntOrNull()
+                val channelIdx = channelIdxFromParam ?: params["channel"]?.toIntOrNull() ?: -1
+                val wavelengthNm = if (imageType == "dark") "" else (params["wavelength"] ?: "")
 
-                val safeName = fileNameHint.ifBlank {
-                    if (channelIdx >= 0) "CAL_image_%02d.png".format(channelIdx)
-                    else "CAL_image_${System.currentTimeMillis()}.png"
+                val safeName = when {
+                    imageType == "dark" && channelIdx >= 0 -> "CAL_dark_%02d.png".format(channelIdx)
+                    imageType == "dark" -> "CAL_image_dark.png"
+                    fileNameHint.isNotBlank() -> normalizedPngFilename(fileNameHint)
+                    channelIdx >= 0 -> "CAL_image_%02d.png".format(channelIdx)
+                    else -> "CAL_image_${System.currentTimeMillis()}.png"
                 }
 
                 val savedPath = handleCalPng(
                     calRunId = calRunId,
                     filename = safeName,
                     tmpFile = tmpFile,
+                    imageSpec = imageSpec,
                     channelIdx = channelIdx,
                     wavelengthNm = wavelengthNm
                 )
@@ -283,7 +295,9 @@ class UploadServer(
             // ── 4) AMSI PNGs (default) ────────────────────────────────────────────────────────────
             // Compute where the image will be saved and log it (full, real path)
             val sessionDir = File(sessionsRoot, sessionId).apply { mkdirs() }
-            val safeName = fileNameHint.ifBlank { "image_${System.currentTimeMillis()}.png" }
+            val safeName = normalizedPngFilename(
+                fileNameHint.ifBlank { "image_${System.currentTimeMillis()}.png" }
+            )
             val plannedTarget = File(sessionDir, safeName)
             Log.i(TAG, "AMSI: saving PNG -> ${plannedTarget.absolutePath}")
 
@@ -292,6 +306,7 @@ class UploadServer(
                 sessionId = sessionId,
                 filename = safeName,
                 tmpFile = tmpFile,
+                imageSpec = imageSpec,
                 isPmfi = false
             )
         } catch (e: Exception) {
@@ -308,6 +323,7 @@ class UploadServer(
         calRunId: String,
         filename: String,
         tmpFile: File,
+        imageSpec: UploadImageSpec,
         channelIdx: Int,
         wavelengthNm: String
     ): String {
@@ -323,11 +339,7 @@ class UploadServer(
 
         val target = File(calDir, filename)
 
-        try {
-            tmpFile.copyTo(target, overwrite = true)
-        } finally {
-            tmpFile.delete()
-        }
+        persistUploadedImage(tmpFile, target, imageSpec)
 
         // Stash / merge this path into the DB for this calRunId.
         upsertCalibrationProfileImages(
@@ -419,9 +431,11 @@ class UploadServer(
             val root = org.json.JSONObject(txt)
             val modeFromJson = root.optString("mode").lowercase(Locale.ROOT)
             val ledNormsArr = if (root.has("led_norms")) root.optJSONArray("led_norms") else null
+            val calResultsArr = if (root.has("results")) root.optJSONArray("results") else null
             val targetDn    = if (root.has("target_dn")) root.optDouble("target_dn") else Double.NaN
 
             val ledNormsJsonStr = ledNormsArr?.toString()
+            val calResultsJsonStr = calResultsArr?.toString()
 
             val sessionIdFromJson = root.optString("session_id").takeIf { it.isNotBlank() }
             val env = root.optJSONObject("env")
@@ -432,6 +446,19 @@ class UploadServer(
 
             val runId = (hintedRunId ?: sessionIdFromJson)
                 ?: return badRequest("metadata.json missing sessionId/runId")
+
+            // Persist calibration metadata JSON alongside calibration images
+            if (modeFromJson == "cal") {
+                try {
+                    val calRoot = File(sessionsRoot, "CAL").apply { mkdirs() }
+                    val calDir  = File(calRoot, runId).apply { mkdirs() }
+                    val target  = File(calDir, "${runId}_metadata.json")
+                    target.writeText(txt)
+                    Log.i(TAG, "Calibration metadata saved: ${target.absolutePath}")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to save calibration metadata for runId=$runId", e)
+                }
+            }
 
             // Try to update now; if no row yet, cache and apply on insert
             scope.launch {
@@ -453,6 +480,7 @@ class UploadServer(
                         calDao.upsertCalibrationMetadata(
                             runId = runId,
                             ledNormsJson = ledNormsJsonStr,
+                            calResultsJson = calResultsJsonStr,
                             envTempC = tempC,
                             envHumidity = hum,
                             envTsUtc = tsUtc,
@@ -605,17 +633,14 @@ class UploadServer(
         sessionId: String,
         filename: String,
         tmpFile: File,
+        imageSpec: UploadImageSpec,
         isPmfi: Boolean
     ): Response {
         val sessionDir = File(sessionsRoot, sessionId).apply { mkdirs() }
         val target = File(sessionDir, filename)
 
-        try {
-            Log.i(TAG, "AMSI: saving PNG -> ${target.absolutePath}")
-            tmpFile.copyTo(target, overwrite = true)
-        } finally {
-            tmpFile.delete()
-        }
+        Log.i(TAG, "AMSI: saving PNG -> ${target.absolutePath}")
+        persistUploadedImage(tmpFile, target, imageSpec)
 
         val list = amsiUploads.getOrPut(sessionId) { synchronizedList(mutableListOf()) }
         list.add(target.absolutePath)
@@ -646,6 +671,63 @@ class UploadServer(
     // --------------------------------------------------------------------------------------------
     // Helpers
     // --------------------------------------------------------------------------------------------
+    private fun buildUploadImageSpec(params: Map<String, String>, fileNameHint: String): UploadImageSpec {
+        val sourceFormat = (
+                params["sourceFormat"]
+                    ?: File(fileNameHint).extension.takeIf { it.isNotBlank() }
+                    ?: "png"
+                ).lowercase(Locale.ROOT)
+        val renderFormat = (params["phoneRenderFormat"] ?: "png").lowercase(Locale.ROOT)
+        return UploadImageSpec(
+            sourceFormat = sourceFormat,
+            sourceBitDepth = params["sourceBitDepth"]?.toIntOrNull(),
+            renderFormat = renderFormat,
+            saveAsPng = (sourceFormat == "dng" && renderFormat == "png")
+        )
+    }
+
+    private fun normalizedPngFilename(name: String): String {
+        val raw = name.ifBlank { "image_${System.currentTimeMillis()}.png" }
+        return if (raw.lowercase(Locale.ROOT).endsWith(".dng")) {
+            raw.substring(0, raw.length - 4) + ".png"
+        } else if (File(raw).extension.isBlank()) {
+            "$raw.png"
+        } else {
+            raw
+        }
+    }
+
+    private fun persistUploadedImage(tmpFile: File, target: File, imageSpec: UploadImageSpec) {
+        target.parentFile?.mkdirs()
+        try {
+            if (imageSpec.saveAsPng) {
+                convertDngToPng(tmpFile, target, imageSpec)
+            } else {
+                tmpFile.copyTo(target, overwrite = true)
+            }
+            if (target.extension.equals("png", ignoreCase = true)) {
+                PngHeaderReader.read(target)?.let { info ->
+                    Log.i(TAG, "Saved ${target.name}: ${info.longLabel}")
+                }
+            }
+        } finally {
+            tmpFile.delete()
+        }
+    }
+
+    private fun convertDngToPng(tmpFile: File, target: File, imageSpec: UploadImageSpec) {
+        RawImageNative.convertDngTo16BitPng(
+            inputPath = tmpFile.absolutePath,
+            outputPath = target.absolutePath,
+            sourceBitDepth = imageSpec.sourceBitDepth
+        )
+        Log.i(
+            TAG,
+            "Converted DNG -> 16-bit PNG: ${target.absolutePath} " +
+                    "(sourceBitDepth=${imageSpec.sourceBitDepth ?: -1})"
+        )
+    }
+
     private fun looksLikeZip(name: String, contentType: String, tmpFile: File): Boolean {
         val byExt = name.lowercase(Locale.ROOT).endsWith(".zip")
         val byType = contentType.contains("application/zip")
