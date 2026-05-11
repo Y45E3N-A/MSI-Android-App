@@ -48,7 +48,6 @@ dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.appcompat:appcompat:1.6.1")
     implementation("com.google.android.material:material:1.11.0")
-    implementation ("io.socket:socket.io-client:2.0.1")
     implementation ("androidx.exifinterface:exifinterface:1.3.7")
     // Navigation
     implementation("androidx.navigation:navigation-fragment-ktx:2.7.7")

@@ -60,6 +60,12 @@ data class IniGetResponse(
     val error: String? = null
 )
 
+// /amsi/preview response: {"enabled": true|false}
+data class AmsiPreviewResponse(
+    val enabled: Boolean? = null,
+    val error: String? = null
+)
+
 // Body for /pmfi/start (server accepts any of these; at least one config must be provided)
 data class PmfiStartBody(
     val ini_text: String,
@@ -91,6 +97,14 @@ interface PiApiService {
         @Query("reason") reason: String = "aborted by client"
     ): retrofit2.Response<Unit>
 
+    @GET("/amsi/preview")
+    suspend fun amsiPreviewStatus(): Response<AmsiPreviewResponse>
+
+    @POST("/amsi/preview")
+    suspend fun setAmsiPreview(
+        @Query("enabled") enabled: Boolean
+    ): Response<AmsiPreviewResponse>
+
     // --- PMFI ---
     @POST("/pmfi/start")
     suspend fun pmfiStart(@Body body: PmfiStartBody): Response<PmfiStartResponse>
@@ -116,7 +130,7 @@ interface PiApiService {
     companion object {
         // Singleton setup with sane timeouts for Pi on hotspot
         @Volatile private var retrofit: Retrofit? = null
-        @Volatile private var baseUrl: String = "http://192.168.4.1:5000"
+        @Volatile private var baseUrl: String = "http://0.0.0.0:5000"
 
         private fun okHttp(): OkHttpClient =
             OkHttpClient.Builder()

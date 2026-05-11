@@ -11,9 +11,7 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
-import android.widget.GridLayout
 import android.widget.ImageView
-import android.widget.ScrollView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
@@ -112,14 +110,21 @@ class ControlFragment : Fragment() {
     private val previewRequestAckWindowMs = 900L
     // Remember preview state before AMSI so we can restore warming afterwards
     private var wasPreviewOnBeforeAmsi = false
+    private var amsiSocketPreviewEnabled = false
+    private var amsiSocketPreviewToggleInFlight = false
 
     // Preview UI
-    private enum class PreviewMode { NONE, IMAGE_CAPTURE, LIVE_FEED }
-    private var mode: PreviewMode = PreviewMode.NONE
+    private enum class PreviewMode {
+        OFF,
+        STARTING,
+        LIVE_FEED,
+        AMSI_GRID
+    }
+
+    private var mode: PreviewMode = PreviewMode.OFF
+
     private lateinit var previewContainer: FrameLayout
-    private lateinit var previewScroll: ScrollView
     private var liveImage: ImageView? = null
-    private var grid: GridLayout? = null
     private val gridImages = ArrayList<ImageView>(16)
 
     // Polling / watchdog
@@ -160,13 +165,158 @@ class ControlFragment : Fragment() {
     }
     // If we haven't seen an env event in a while, attempt a light HTTP poll
 
+    private fun showPreviewOffState() {
+        mode = PreviewMode.OFF
+        previewActive = false
 
+        liveImage = null
+        previewContainer.removeAllViews()
+
+        binding.previewTitleText.text = "Camera Preview"
+        binding.previewSubtitleText.text = "Use preview to align the leaf before capture."
+        binding.previewStatusChip.text = "Off"
+
+        binding.previewEmptyState.visibility = View.VISIBLE
+        binding.previewLoadingState.visibility = View.GONE
+        binding.previewOverlay.visibility = View.GONE
+    }
+
+    private fun showPreviewStartingState() {
+        mode = PreviewMode.STARTING
+
+        liveImage = null
+        previewContainer.removeAllViews()
+
+        binding.previewTitleText.text = "Camera Preview"
+        binding.previewSubtitleText.text = "Connecting to camera stream..."
+        binding.previewStatusChip.text = "Starting"
+
+        binding.previewEmptyState.visibility = View.GONE
+        binding.previewLoadingState.visibility = View.VISIBLE
+        binding.previewOverlay.visibility = View.GONE
+    }
+
+    private fun startLivePreview() {
+        if (mode == PreviewMode.LIVE_FEED && liveImage != null) return
+
+        mode = PreviewMode.LIVE_FEED
+        previewActive = true
+
+        binding.previewTitleText.text = "Live Preview"
+        binding.previewSubtitleText.text = "Real-time camera alignment view."
+        binding.previewStatusChip.text = "Live"
+
+        binding.previewEmptyState.visibility = View.GONE
+        binding.previewLoadingState.visibility = View.GONE
+        binding.previewOverlay.visibility = View.VISIBLE
+        binding.previewOverlayText.text = "Live Preview"
+        binding.previewFpsText.text = "Live"
+
+        liveImage = ImageView(requireContext()).apply {
+            setBackgroundColor(Color.BLACK)
+            scaleType = ImageView.ScaleType.FIT_CENTER
+            layoutParams = FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        previewContainer.removeAllViews()
+        previewContainer.addView(liveImage)
+    }
+
+
+
+    private fun clearPreview() {
+        showPreviewOffState()
+        hideAmsiGrid()
+    }
+
+    private fun startImageGrid() {
+        showPreviewOffState()
+
+        mode = PreviewMode.AMSI_GRID
+        showAmsiGrid()
+
+        binding.amsiGridStatusChip.text = "0/16"
+        binding.amsiGridProgressBar.max = 16
+        binding.amsiGridProgressBar.progress = 0
+
+        gridImages.forEach { imageView ->
+            imageView.setImageResource(android.R.drawable.ic_menu_gallery)
+            imageView.alpha = 0.45f
+        }
+    }
+
+    private fun showAmsiGrid() {
+        binding.amsiGridCard.visibility = View.VISIBLE
+    }
+
+    private fun hideAmsiGrid() {
+        binding.amsiGridCard.visibility = View.GONE
+        binding.amsiGridProgressBar.progress = 0
+        binding.amsiGridStatusChip.text = "0/16"
+
+        gridImages.forEach { imageView ->
+            imageView.setImageResource(android.R.drawable.ic_menu_gallery)
+            imageView.alpha = 0.45f
+        }
+    }
+
+    private fun updateGrid(bitmaps: List<Bitmap?>) {
+        if (gridImages.isEmpty()) return
+
+        val received = bitmaps.count { it != null }.coerceIn(0, 16)
+
+        showAmsiGrid()
+
+        binding.amsiGridProgressBar.max = 16
+        binding.amsiGridProgressBar.progress = received
+        binding.amsiGridStatusChip.text = "$received/16"
+
+        for (i in 0 until 16) {
+            val imageView = gridImages.getOrNull(i) ?: continue
+            val bitmap = bitmaps.getOrNull(i)
+
+            if (bitmap != null) {
+                imageView.setImageBitmap(bitmap)
+                imageView.alpha = 1f
+            } else {
+                imageView.setImageResource(android.R.drawable.ic_menu_gallery)
+                imageView.alpha = 0.45f
+            }
+        }
+    }
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
         // ----- Cache a few views for preview area -----
-        previewContainer = view.findViewById(R.id.preview_container)
-        previewScroll    = view.findViewById(R.id.preview_scrollview)
+        previewContainer = binding.previewContainer
+
+        gridImages.clear()
+        gridImages.addAll(
+            listOf(
+                binding.amsiTileImage01,
+                binding.amsiTileImage02,
+                binding.amsiTileImage03,
+                binding.amsiTileImage04,
+                binding.amsiTileImage05,
+                binding.amsiTileImage06,
+                binding.amsiTileImage07,
+                binding.amsiTileImage08,
+                binding.amsiTileImage09,
+                binding.amsiTileImage10,
+                binding.amsiTileImage11,
+                binding.amsiTileImage12,
+                binding.amsiTileImage13,
+                binding.amsiTileImage14,
+                binding.amsiTileImage15,
+                binding.amsiTileImage16
+            )
+        )
+
+        showPreviewOffState()
+        hideAmsiGrid()
 
         // ===== Initial UI wiring / click handlers =====
         setupButtons()
@@ -176,6 +326,70 @@ class ControlFragment : Fragment() {
         hookSocketCore()      // "connect", "disconnect", "error" → updateConnUi(...)
         hookEnvSocket()       // "env.update" → renderEnv(...)
         hookBatterySocket()   // "battery.update" → renderBatteryFromJson(...)
+
+        // --- AMSI progress/status from Pi. This stays useful even when Socket.IO image previews are off. ---
+        PiSocketManager.on("amsi.started") { payload ->
+            val j = payload as? JSONObject
+            val sessionId = j?.optString("session_id")?.takeIf { it.isNotBlank() }
+            val channels = j?.optInt("channels", 16) ?: 16
+            if (!isAdded) return@on
+            requireActivity().runOnUiThread {
+                currentAmsiRunId = sessionId
+                amsiCaptureTotal = channels.coerceAtLeast(1)
+                amsiZipUploadNotified = false
+                isCaptureOngoing = true
+                vm.isCapturing.value = true
+                setUiBusy(true)
+                if (amsiSocketPreviewEnabled) {
+                    startImageGrid()
+                    vm.capturedBitmaps.value = MutableList(amsiCaptureTotal) { null }
+                } else {
+                    clearPreview()
+                }
+                setAmsiCapturing(0, amsiCaptureTotal)
+            }
+        }
+
+        PiSocketManager.on("amsi.progress") { payload ->
+            val j = payload as? JSONObject ?: return@on
+            val total = j.optInt("total", amsiCaptureTotal).coerceAtLeast(1)
+            val done = (j.optInt("index", -1) + 1).coerceAtLeast(0)
+            if (!isAdded) return@on
+            requireActivity().runOnUiThread {
+                isCaptureOngoing = true
+                vm.isCapturing.value = true
+                setAmsiCapturing(done, total)
+            }
+        }
+
+        PiSocketManager.on("amsi.uploaded") { _payload ->
+            if (!isAdded) return@on
+            requireActivity().runOnUiThread {
+                if (!amsiZipUploadNotified) {
+                    amsiZipUploadNotified = true
+                    setAmsiUploadComplete()
+                }
+            }
+        }
+
+        PiSocketManager.on("amsi.complete") { _payload ->
+            if (!isAdded) return@on
+            requireActivity().runOnUiThread {
+                setAmsiUploadComplete()
+                isCaptureOngoing = false
+                vm.isCapturing.value = false
+                setUiBusy(false)
+                viewLifecycleOwner.lifecycleScope.launch {
+                    delay(1500)
+                    if (!isAdded) return@launch
+                    binding.captureProgressBar.visibility = View.GONE
+                    binding.captureProgressText.visibility = View.GONE
+                    currentAmsiRunId = null
+                    if (wasPreviewOnBeforeAmsi) kickPreviewResume()
+                    wasPreviewOnBeforeAmsi = false
+                }
+            }
+        }
 
         // --- AMSI abort/error from Pi ---
         PiSocketManager.on("amsi_error") { _payload ->
@@ -468,10 +682,10 @@ class ControlFragment : Fragment() {
                 if (connected) {
                     updateConnUi(true)
                 } else {
-                    // model → idle
+                    // model -> idle
                     vm.resetToIdle()
 
-                    // UI → fresh, navigate to start tab
+                    // UI -> fresh, navigate to start tab
                     resetUiToFreshState()
                     (requireActivity() as? MainActivity)?.goToStartPage()
                 }
@@ -486,26 +700,28 @@ class ControlFragment : Fragment() {
             updateGrid(restoredImgs)
             binding.captureProgressBar.max = 16
             binding.captureProgressBar.progress = restoredCount
-            binding.captureProgressText.text = "Receiving images: $restoredCount/16"
+            binding.captureProgressText.text = "Capturing on Pi: $restoredCount/16"
             binding.captureProgressBar.visibility = View.VISIBLE
             binding.captureProgressText.visibility = View.VISIBLE
         }
 
         // ===== LiveData observers → keep UI reactive =====
         vm.capturedBitmaps.observe(viewLifecycleOwner) {
-            updateGrid(it ?: List(16) { null })
+            if (amsiSocketPreviewEnabled || mode == PreviewMode.AMSI_GRID) {
+                updateGrid(it ?: List(16) { null })
+            }
         }
 
         vm.imageCount.observe(viewLifecycleOwner) { c ->
             binding.captureProgressBar.progress = c
-            binding.captureProgressText.text = "Receiving images: $c/16"
+            binding.captureProgressText.text = "Capturing on Pi: $c/16"
             when {
                 c in 1..15 -> {
                     binding.captureProgressBar.visibility = View.VISIBLE
                     binding.captureProgressText.visibility = View.VISIBLE
                 }
                 c == 16 -> {
-                    binding.captureProgressText.text = "All images received!"
+                    binding.captureProgressText.text = "Uploading AMSI ZIP..."
                 }
                 else -> {
                     binding.captureProgressBar.visibility = View.GONE
@@ -671,6 +887,13 @@ class ControlFragment : Fragment() {
         binding.lastPiButtonText.text = "MFi Button Pressed: --"
         binding.switchCameraPreview.isChecked = false
         binding.switchCameraPreview.isEnabled = false
+        amsiSocketPreviewEnabled = false
+        amsiSocketPreviewToggleInFlight = false
+        binding.switchAmsiSocketPreview.setOnCheckedChangeListener(null)
+        binding.switchAmsiSocketPreview.isChecked = false
+        binding.switchAmsiSocketPreview.isEnabled = false
+        binding.switchAmsiSocketPreview.alpha = 0.4f
+        attachAmsiSocketPreviewToggleListener()
         wasPreviewOnBeforeAmsi = false
 
         // AMSI progress
@@ -702,8 +925,7 @@ class ControlFragment : Fragment() {
 
         // Preview area
         clearPreview()
-        previewScroll.scrollTo(0, 0)
-        view?.findViewById<ScrollView>(R.id.controls_scrollview)?.scrollTo(0, 0)
+        view?.findViewById<android.widget.ScrollView>(R.id.controls_scrollview)?.scrollTo(0, 0)
 
         // Inputs / buttons
         binding.setIpButton.isEnabled = true
@@ -904,6 +1126,7 @@ class ControlFragment : Fragment() {
         // Preview toggle (SW4)
         // Preview toggle (SW4)
         attachPreviewToggleListener()
+        attachAmsiSocketPreviewToggleListener()
 
 
         // AMSI (SW2)
@@ -929,7 +1152,11 @@ class ControlFragment : Fragment() {
 
                 // 3) Start AMSI UI
                 vm.isCapturing.value = true
-                startImageGrid()
+                if (amsiSocketPreviewEnabled) {
+                    startImageGrid()
+                } else {
+                    clearPreview()
+                }
                 startCaptureUi()
                 vm.capturedBitmaps.value = MutableList(16) { null }
                 vm.imageCount.value = 0
@@ -1033,6 +1260,9 @@ class ControlFragment : Fragment() {
         binding.captureProgressBar.progress = 0
         binding.captureProgressBar.visibility = View.GONE
         binding.captureProgressText.visibility = View.GONE
+        binding.switchAmsiSocketPreview.isChecked = amsiSocketPreviewEnabled
+        binding.switchAmsiSocketPreview.isEnabled = false
+        binding.switchAmsiSocketPreview.alpha = 0.4f
     }
     // REPLACE ENTIRE FUNCTION
     private fun attachPreviewToggleListener() {
@@ -1074,6 +1304,71 @@ class ControlFragment : Fragment() {
         }
     }
 
+    private fun attachAmsiSocketPreviewToggleListener() {
+        binding.switchAmsiSocketPreview.setOnCheckedChangeListener(null)
+        binding.switchAmsiSocketPreview.isChecked = amsiSocketPreviewEnabled
+
+        binding.switchAmsiSocketPreview.setOnCheckedChangeListener { _, checked ->
+            if (!isPiConnected || isGlobalBusy() || amsiSocketPreviewToggleInFlight) {
+                binding.switchAmsiSocketPreview.setOnCheckedChangeListener(null)
+                binding.switchAmsiSocketPreview.isChecked = amsiSocketPreviewEnabled
+                attachAmsiSocketPreviewToggleListener()
+                return@setOnCheckedChangeListener
+            }
+            setAmsiSocketPreviewEnabled(checked)
+        }
+    }
+
+    private fun syncAmsiSocketPreviewToggle() {
+        if (!isPiConnected || currentIp.isBlank()) return
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val resp = PiApi.api.amsiPreviewStatus()
+                val enabled = resp.body()?.enabled
+                if (resp.isSuccessful && enabled != null && isAdded) {
+                    amsiSocketPreviewEnabled = enabled
+                    binding.switchAmsiSocketPreview.setOnCheckedChangeListener(null)
+                    binding.switchAmsiSocketPreview.isChecked = enabled
+                    attachAmsiSocketPreviewToggleListener()
+                    setUiBusy(isGlobalBusy())
+                }
+            } catch (_: Exception) {
+                // Keep the local default; the toggle will retry on user action.
+            }
+        }
+    }
+
+    private fun setAmsiSocketPreviewEnabled(enabled: Boolean) {
+        amsiSocketPreviewToggleInFlight = true
+        binding.switchAmsiSocketPreview.isEnabled = false
+        binding.switchAmsiSocketPreview.alpha = 0.4f
+
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val resp = PiApi.api.setAmsiPreview(enabled)
+                val confirmed = resp.body()?.enabled
+                if (resp.isSuccessful && confirmed != null) {
+                    amsiSocketPreviewEnabled = confirmed
+                    toast(
+                        if (confirmed) "4x4 AMSI preview enabled - capture will be slower"
+                        else "4x4 AMSI preview disabled for faster capture"
+                    )
+                } else {
+                    toast("AMSI preview toggle failed: ${resp.code()}")
+                }
+            } catch (e: Exception) {
+                toast("Network error: ${e.localizedMessage}")
+            } finally {
+                amsiSocketPreviewToggleInFlight = false
+                if (!isAdded) return@launch
+                binding.switchAmsiSocketPreview.setOnCheckedChangeListener(null)
+                binding.switchAmsiSocketPreview.isChecked = amsiSocketPreviewEnabled
+                attachAmsiSocketPreviewToggleListener()
+                setUiBusy(isGlobalBusy())
+            }
+        }
+    }
+
 // ADD — robust preview control + waiting for Pi ack
 
     // Ask the Pi to set preview ON/OFF and wait for ack via 'sw4' in state updates.
@@ -1093,11 +1388,17 @@ class ControlFragment : Fragment() {
     }
 
     private fun requestPreviewSet(targetOn: Boolean) {
-        if (!targetOn) clearPreview() else startLivePreview()
+        if (targetOn) {
+            showPreviewStartingState()
+        } else {
+            showPreviewOffState()
+        }
+
         previewActive = targetOn
 
         if (lastSw4FromServer == targetOn) {
             clearPreviewRequest()
+            if (targetOn) startLivePreview() else showPreviewOffState()
             return
         }
 
@@ -1106,13 +1407,16 @@ class ControlFragment : Fragment() {
     }
 
     private suspend fun ensurePreviewSet(targetOn: Boolean, timeoutMs: Long = 2_000L): Boolean {
-        // Local canvas update for instant UX
-        if (!targetOn) clearPreview() else startLivePreview()
+        if (targetOn) {
+            showPreviewStartingState()
+        } else {
+            showPreviewOffState()
+        }
 
-        // If server already in target state, we're done
         if (lastSw4FromServer == targetOn) {
             previewActive = targetOn
             clearPreviewRequest()
+            if (targetOn) startLivePreview() else showPreviewOffState()
             return true
         }
 
@@ -1124,19 +1428,21 @@ class ControlFragment : Fragment() {
             if (lastSw4FromServer == targetOn) {
                 previewActive = targetOn
                 clearPreviewRequest()
+                if (targetOn) startLivePreview() else showPreviewOffState()
                 return true
             }
             delay(40)
         }
 
-        // Timed out — fall back to local truth (off is safest)
         if (!targetOn) {
             previewActive = false
-            clearPreview()
+            showPreviewOffState()
         }
+
         if (!isPreviewRequestPending()) {
             clearPreviewRequest()
         }
+
         return lastSw4FromServer == targetOn
     }
 
@@ -1149,9 +1455,71 @@ class ControlFragment : Fragment() {
     }
     // Keep track of the AMSI run we’re receiving
     private var currentAmsiRunId: String? = null
+    private var amsiCaptureTotal = 16
+    private var amsiZipUploadNotified = false
+    private val amsiZipBytesByRun = mutableMapOf<String, Long>()
+
+    private fun startCaptureUi() {
+        amsiCaptureTotal = 16
+        amsiZipUploadNotified = false
+        setAmsiCapturing(0, amsiCaptureTotal)
+    }
+    private fun showAmsiProgress(progress: Int, max: Int = amsiCaptureTotal, text: String) {
+        binding.captureProgressBar.max = max.coerceAtLeast(1)
+        binding.captureProgressBar.progress = progress.coerceIn(0, binding.captureProgressBar.max)
+        binding.captureProgressText.text = text
+        binding.captureProgressBar.visibility = View.VISIBLE
+        binding.captureProgressText.visibility = View.VISIBLE
+    }
+
+    private fun setAmsiCapturing(done: Int, total: Int = amsiCaptureTotal) {
+        amsiCaptureTotal = total.coerceAtLeast(1)
+        val safeDone = done.coerceIn(0, amsiCaptureTotal)
+
+        showAmsiProgress(
+            progress = safeDone,
+            max = amsiCaptureTotal,
+            text = "Capturing on Pi: $safeDone/$amsiCaptureTotal"
+        )
+
+        if (amsiSocketPreviewEnabled) {
+            showAmsiGrid()
+            binding.amsiGridProgressBar.max = amsiCaptureTotal
+            binding.amsiGridProgressBar.progress = safeDone
+            binding.amsiGridStatusChip.text = "$safeDone/$amsiCaptureTotal"
+        }
+    }
+
+    private fun setAmsiUploadingZip() {
+        showAmsiProgress(
+            progress = amsiCaptureTotal,
+            max = amsiCaptureTotal,
+            text = "Uploading AMSI ZIP..."
+        )
+    }
+
+    private fun setAmsiUploadComplete() {
+        showAmsiProgress(
+            progress = amsiCaptureTotal,
+            max = amsiCaptureTotal,
+            text = "AMSI ZIP upload complete"
+        )
+
+        if (amsiSocketPreviewEnabled) {
+            binding.amsiGridProgressBar.max = amsiCaptureTotal
+            binding.amsiGridProgressBar.progress = amsiCaptureTotal
+            binding.amsiGridStatusChip.text = "$amsiCaptureTotal/$amsiCaptureTotal"
+        }
+    }
 
     private fun observeUploadProgress() {
         var lastHandledRunId: String? = null
+
+        UploadProgressBus.amsiZipBytes.observe(viewLifecycleOwner) { (sessionId, bytes) ->
+            if (bytes > 0L) {
+                amsiZipBytesByRun[sessionId] = bytes
+            }
+        }
 
         UploadProgressBus.uploadProgress.observe(viewLifecycleOwner) { (sessionId, count) ->
             // Ignore replayed/stale emissions from previous app sessions
@@ -1161,12 +1529,12 @@ class ControlFragment : Fragment() {
             if (isPmfiRunning || (vm.isCalibrating.value == true)) return@observe
 
             // First image → mark as active run
-            if (count == 1) currentAmsiRunId = sessionId
+            if (count in 1..16 && currentAmsiRunId == null) currentAmsiRunId = sessionId
 
             Log.d(TAG, "Upload progress $sessionId : $count")
             vm.imageCount.value = count
             binding.captureProgressBar.progress = count
-            binding.captureProgressText.text = "Receiving images: $count/16"
+            binding.captureProgressText.text = "Saving images: $count/16"
 
             when {
                 count in 1..15 -> {
@@ -1178,20 +1546,24 @@ class ControlFragment : Fragment() {
                 count == 16 -> {
                     lastHandledRunId = sessionId
                     vm.isCapturing.value = false
-                    binding.captureProgressText.text = "All images received!"
+                    binding.captureProgressText.text = "AMSI ZIP upload complete"
 
                     viewLifecycleOwner.lifecycleScope.launch {
                         val id = currentAmsiRunId ?: sessionId
-                        val humanSize = resolveAmsiHumanSize(id)
+                        val humanZipSize = amsiZipBytesByRun.remove(id)?.let { formatBytes(it) }
                         // Only show toast if this run actually happened during this session
                         if (isAdded && currentAmsiRunId == sessionId) {
-                            toast(if (humanSize != null) "AMSI saved $humanSize" else "AMSI saved")
+                            toast(
+                                if (humanZipSize != null) "AMSI saved ($humanZipSize ZIP)"
+                                else "AMSI saved"
+                            )
                         }
 
                         delay(1500)
                         if (!isAdded) return@launch
                         binding.captureProgressBar.visibility = View.GONE
                         binding.captureProgressText.visibility = View.GONE
+                        currentAmsiRunId = null
                         clearPreview()
                         if (wasPreviewOnBeforeAmsi) kickPreviewResume()
                         wasPreviewOnBeforeAmsi = false
@@ -1208,23 +1580,6 @@ class ControlFragment : Fragment() {
         }
     }
 
-
-    // ===== Await helper: wait for preview to drop =====
-    private suspend fun waitForPreviewOff(timeoutMs: Long = 1500L) {
-        val start = System.currentTimeMillis()
-
-        // Fast local UX and server hint:
-        if (previewActive && binding.switchCameraPreview.isChecked) {
-            binding.switchCameraPreview.isChecked = false
-            clearPreview()
-            triggerButton("SW4")
-        }
-
-        // Small grace so the Pi can stop & join its preview thread
-        while (previewActive && (System.currentTimeMillis() - start) < timeoutMs) {
-            delay(50)
-        }
-    }
     // --- Battery telemetry (freshness tracking) ---
     private var lastBatteryEventAt: Long = 0L
     private val batteryPollMs = 10_000L
@@ -1321,9 +1676,9 @@ class ControlFragment : Fragment() {
 
     // ===== Status polling / connection =====
     private fun setBaseUrls(ip: String) {
-        currentIp = ip
-        PiApi.setBaseUrl(ip)
-        PiSocketManager.setBaseUrl(ip)
+        currentIp = ip.trim()
+        PiApi.setBaseUrl(currentIp)
+        PiSocketManager.setBaseUrl(currentIp)
         PiSocketManager.reconnect()
         PiSocketManager.emit("get_state", JSONObject())
     }
@@ -1331,6 +1686,7 @@ class ControlFragment : Fragment() {
     private fun connectSocket() {
         PiSocketManager.connect(::onPreviewImage, ::onStateUpdate)
         PiSocketManager.emit("get_state", JSONObject())
+        syncAmsiSocketPreviewToggle()
     }
 
     private fun startPolling() {
@@ -1492,7 +1848,14 @@ class ControlFragment : Fragment() {
             ContextCompat.getDrawable(requireContext(), drawable)
         binding.piConnectionStatus.text = when (connected) {
             true -> "Status: Connected"
-            false -> "Status: Not Connected"
+            false -> {
+                val host = currentIp.ifBlank { binding.ipAddressInput.text?.toString()?.trim().orEmpty() }
+                if (host.isNotBlank()) {
+                    "Status: Not Connected (${host}:5000 unreachable)"
+                } else {
+                    "Status: Not Connected"
+                }
+            }
             else -> "Status: Unknown"
         }
         if (connected == true) {
@@ -1501,11 +1864,17 @@ class ControlFragment : Fragment() {
             cancelPendingDisconnect()
         } else if (connected == false) {
             isPiConnected = false
+            isConnecting = false
         }
 
 // use the single source of truth
         val busy = isGlobalBusy()
         setUiBusy(busy && isPiConnected)
+
+        binding.ipInputLayout.helperText = when (connected) {
+            false -> "Check the Pi IP in your phone hotspot settings, then update it here."
+            else -> "Use the Pi IP shown in your phone hotspot settings."
+        }
 
     }
 
@@ -1513,7 +1882,10 @@ class ControlFragment : Fragment() {
     private fun hookSocketCore() {
         PiSocketManager.on("connect") {
             if (!isAdded) return@on
-            requireActivity().runOnUiThread { updateConnUi(true) }
+            requireActivity().runOnUiThread {
+                updateConnUi(true)
+                syncAmsiSocketPreviewToggle()
+            }
         }
         PiSocketManager.on("disconnect") { scheduleDebouncedDisconnect() }
         PiSocketManager.on("connect_error") { scheduleDebouncedDisconnect() }
@@ -1596,10 +1968,17 @@ class ControlFragment : Fragment() {
     private fun onPreviewImage(data: JSONObject, bmp: Bitmap) {
         cancelPendingDisconnect()
         if (!isAdded) return
+
         requireActivity().runOnUiThread {
             when (mode) {
-                PreviewMode.LIVE_FEED -> liveImage?.setImageBitmap(bmp)
-                PreviewMode.IMAGE_CAPTURE -> {
+                PreviewMode.LIVE_FEED, PreviewMode.STARTING -> {
+                    if (mode != PreviewMode.LIVE_FEED) {
+                        startLivePreview()
+                    }
+                    liveImage?.setImageBitmap(bmp)
+                }
+
+                PreviewMode.AMSI_GRID -> {
                     var idx = data.optInt("index", -1)
                     if (idx !in 0..15) idx = data.optInt("idx", -1)
                     if (idx !in 0..15) idx = data.optInt("i", -1)
@@ -1610,9 +1989,13 @@ class ControlFragment : Fragment() {
                         val current = vm.capturedBitmaps.value ?: List(16) { null }
                         idx = current.indexOfFirst { it == null }.takeIf { it >= 0 } ?: -1
                     }
-                    if (idx in 0..15) vm.addBitmap(idx, bmp)
+
+                    if (idx in 0..15) {
+                        vm.addBitmap(idx, bmp)
+                    }
                 }
-                else -> Unit
+
+                PreviewMode.OFF -> Unit
             }
         }
     }
@@ -1625,6 +2008,7 @@ class ControlFragment : Fragment() {
         var calNow      = data.optBoolean("calibrating", false)
         val pmfiNow     = data.optBoolean("pmfi_running", false)
         val lastBtn     = data.optString("last_button", "")
+        val statusTag   = data.optString("status_tag", "")
         val pmfiStage   = data.optString("pmfi_stage", "")
         val pmfiSection = data.optString("pmfi_section", "")
 
@@ -1637,6 +2021,9 @@ class ControlFragment : Fragment() {
             }
             if (pmfiStage.isNotBlank()) binding.pmfiStageLabel.text = pmfiStage
             if (pmfiSection.isNotBlank()) binding.pmfiSectionLabel.text = "Current section: $pmfiSection"
+            if (statusTag == "AMSI_UPLOAD" && (isCaptureOngoing || vm.isCapturing.value == true)) {
+                setAmsiUploadingZip()
+            }
 
             // ---- 3) Apply calibration cooldown mask (prevents stale 'calibrating=true') ----
             val pair = dropStaleBusyFlagsFromCal(busyNow, calNow, pmfiNow)
@@ -1653,7 +2040,11 @@ class ControlFragment : Fragment() {
                 // Pi started AMSI; remember whether preview was on so we can restore after
                 wasPreviewOnBeforeAmsi = lastSw4FromServer || binding.switchCameraPreview.isChecked || previewActive
                 ensurePreviewOffAsync(1500)
-                startImageGrid()
+                if (amsiSocketPreviewEnabled) {
+                    startImageGrid()
+                } else {
+                    clearPreview()
+                }
                 startCaptureUi()
                 vm.capturedBitmaps.value = MutableList(16) { null }
                 vm.imageCount.value = 0
@@ -1801,11 +2192,8 @@ class ControlFragment : Fragment() {
     }
 
     private fun clearLiveOnly() {
-        if (mode == PreviewMode.LIVE_FEED) {
-            previewContainer.removeAllViews()
-            liveImage = null
-            mode = PreviewMode.NONE
-            // keep previewScroll VISIBLE; don't touch grid vars
+        if (mode == PreviewMode.LIVE_FEED || mode == PreviewMode.STARTING) {
+            showPreviewOffState()
         }
     }
 
@@ -1951,118 +2339,15 @@ class ControlFragment : Fragment() {
             }
         }
     }
-    // Robust AMSI size resolver with short retry window (up to ~2s).
-    private suspend fun resolveAmsiHumanSize(runId: String): String? = withContext(Dispatchers.IO) {
-        // Try a few times because DB/file I/O can lag the 16th image event
-        repeat(8) { attempt ->
-            try {
-                val db  = com.example.msiandroidapp.data.AppDatabase.getDatabase(requireContext())
-                val dao = db.sessionDao()
-                val s   = dao.findByRunId(runId)
 
-                // 1) Prefer parent of first persisted image path (most reliable)
-                val fromDbDir: java.io.File? = s?.imagePaths?.firstOrNull()?.let { path ->
-                    java.io.File(path).parentFile?.takeIf { it.exists() }
-                }
-
-                // 2) Fallback: app-scoped sessions folder (scoped storage-safe)
-                //    e.g. /storage/emulated/0/Android/data/<pkg>/files/MSI_App/Sessions/<runId>
-                val appFiles = requireContext().getExternalFilesDir(null)
-                val fallbackDir = java.io.File(appFiles, "MSI_App/Sessions/$runId")
-                    .takeIf { it.exists() }
-
-                val dir = fromDbDir ?: fallbackDir
-                if (dir != null) {
-                    val totalBytes = dir.walkTopDown()
-                        .filter { it.isFile }
-                        .map { it.length() }
-                        .sum()
-                    val mb = totalBytes / (1024.0 * 1024.0)
-                    return@withContext String.format(Locale.getDefault(), "%.1f MB", mb)
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "resolveAmsiHumanSize attempt $attempt failed: ${e.message}")
-            }
-            // Backoff a bit then try again
-            Thread.sleep(250)
-        }
-        null
-    }
-
-    // ===== Preview UI helpers =====
-    private fun startImageGrid() {
-        clearPreview()
-        mode = PreviewMode.IMAGE_CAPTURE
-        previewScroll.visibility = View.VISIBLE
-        val g = GridLayout(requireContext()).apply {
-            rowCount = 4; columnCount = 4
-            layoutParams = ViewGroup.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT
-            )
-        }
-        gridImages.clear()
-        repeat(16) {
-            val iv = ImageView(requireContext()).apply {
-                setImageResource(android.R.drawable.ic_menu_gallery)
-                scaleType = ImageView.ScaleType.CENTER_CROP
-                layoutParams = GridLayout.LayoutParams().apply {
-                    width = 0; height = 220
-                    columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
-                    rowSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
-                    setMargins(4, 4, 4, 4)
-                }
-            }
-            g.addView(iv); gridImages.add(iv)
-        }
-        grid = g
-        previewContainer.removeAllViews()
-        previewContainer.addView(g)
-    }
-
-    private fun updateGrid(bitmaps: List<Bitmap?>) {
-        if (grid == null) return
-        for (i in 0 until 16) {
-            val iv = gridImages.getOrNull(i) ?: continue
-            val bmp = bitmaps.getOrNull(i)
-            if (bmp != null) iv.setImageBitmap(bmp)
-            else iv.setImageResource(android.R.drawable.ic_menu_gallery)
+    private fun formatBytes(bytes: Long): String {
+        val mb = bytes / (1024.0 * 1024.0)
+        return if (mb >= 1.0) {
+            String.format(Locale.getDefault(), "%.1f MB", mb)
+        } else {
+            String.format(Locale.getDefault(), "%.0f KB", bytes / 1024.0)
         }
     }
-
-    private fun startCaptureUi() {
-        binding.captureProgressBar.progress = 0
-        binding.captureProgressText.text = "Receiving images: 0/16"
-        binding.captureProgressBar.visibility = View.VISIBLE
-        binding.captureProgressText.visibility = View.VISIBLE
-    }
-
-    private fun startLivePreview() {
-        if (mode == PreviewMode.LIVE_FEED && liveImage != null) return
-        mode = PreviewMode.LIVE_FEED
-        previewActive = true
-        previewScroll.visibility = View.VISIBLE
-        liveImage = ImageView(requireContext()).apply {
-            setBackgroundColor(Color.BLACK)
-            scaleType = ImageView.ScaleType.FIT_CENTER
-            layoutParams = FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT
-            )
-        }
-        previewContainer.removeAllViews()
-        previewContainer.addView(liveImage)
-    }
-
-    private fun clearPreview() {
-        mode = PreviewMode.NONE
-        previewActive = false
-        previewScroll.visibility = View.GONE
-        previewContainer.removeAllViews()
-        liveImage = null
-        grid = null
-        gridImages.clear()
-    }
-
 
     private fun showCalUi(show: Boolean) {
         if (show) {
@@ -2145,6 +2430,10 @@ class ControlFragment : Fragment() {
             val canTogglePreview = connected
             binding.switchCameraPreview.isEnabled = canTogglePreview
             binding.switchCameraPreview.alpha     = if (canTogglePreview) 1f else 0.4f
+
+            val canToggleAmsiSocketPreview = connected && !amsiSocketPreviewToggleInFlight
+            binding.switchAmsiSocketPreview.isEnabled = canToggleAmsiSocketPreview
+            binding.switchAmsiSocketPreview.alpha = if (canToggleAmsiSocketPreview) 1f else 0.4f
         }
         // --- Disconnect button ---
         // Always allowed if we're in any state except "we literally have no connection at all and haven't even tried".
@@ -2166,6 +2455,12 @@ class ControlFragment : Fragment() {
         binding.switchCameraPreview.isEnabled = canTogglePreview
         // If it's disabled while checked, leave it checked visually but grey it out.
         binding.switchCameraPreview.alpha = if (canTogglePreview) 1f else 0.4f
+
+        // --- AMSI Socket.IO 4x4 preview switch ---
+        // This controls whether the Pi emits per-channel preview images during AMSI.
+        val canToggleAmsiSocketPreview = connected && !globalBusy && !amsiSocketPreviewToggleInFlight
+        binding.switchAmsiSocketPreview.isEnabled = canToggleAmsiSocketPreview
+        binding.switchAmsiSocketPreview.alpha = if (canToggleAmsiSocketPreview) 1f else 0.4f
 
         // --- AMSI capture button (SW2 trigger) ---
         // Only if connected AND idle.
@@ -2218,12 +2513,12 @@ class ControlFragment : Fragment() {
 
     private fun saveIp(ip: String) {
         val prefs = requireActivity().getSharedPreferences("APP_SETTINGS", Context.MODE_PRIVATE)
-        prefs.edit().putString("server_ip", ip).apply()
+        prefs.edit().putString("server_ip", ip.trim()).apply()
     }
 
     private fun restoreSavedIp() {
         val prefs = requireActivity().getSharedPreferences("APP_SETTINGS", Context.MODE_PRIVATE)
-        val saved = prefs.getString("server_ip", "") ?: ""
+        val saved = prefs.getString("server_ip", "")?.trim().orEmpty()
         if (saved.isNotEmpty()) {
             binding.ipAddressInput.setText(saved)
             setBaseUrls(saved)

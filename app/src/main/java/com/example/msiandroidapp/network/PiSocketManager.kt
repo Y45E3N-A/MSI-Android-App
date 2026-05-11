@@ -1,27 +1,33 @@
 package com.example.msiandroidapp.network
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.os.Handler
 import android.os.Looper
-import android.util.Base64
 import android.util.Log
+import com.example.msiandroidapp.util.HighBitDepthImageDecoder
 import io.socket.client.IO
 import io.socket.client.Manager
 import io.socket.client.Socket
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 import kotlin.random.Random
 
 object PiSocketManager {
     private const val TAG = "PiSocketManager"
 
     // ---- Config / URL ----
-    private var baseUrl: String = "http://192.168.4.1:5000"
+    private var baseUrl: String = ""
     fun setBaseUrl(ipOrUrl: String) {
-        baseUrl = if (ipOrUrl.startsWith("http")) ipOrUrl else "http://$ipOrUrl:5000"
+        val raw = ipOrUrl.trim()
+        baseUrl = when {
+            raw.isBlank() -> ""
+            raw.startsWith("http") -> raw
+            else -> "http://$raw:5000"
+        }
     }
 
     fun reconnect() {
@@ -33,6 +39,9 @@ object PiSocketManager {
     private var socket: Socket? = null
     private val connecting = AtomicBoolean(false)
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val previewDecodeExecutor = Executors.newSingleThreadExecutor()
+    private val latestPreviewPayload = AtomicReference<Any?>(null)
+    private val previewDecodeScheduled = AtomicBoolean(false)
 
     // Emit buffer for events fired before connection is up
     private data class Queued(val event: String, val data: JSONObject?)
@@ -54,6 +63,8 @@ object PiSocketManager {
     // ---- Connection state callback (optional) ----
     private var connectionStateCallback: ((connected: Boolean) -> Unit)? = null
     fun setConnectionStateListener(cb: ((Boolean) -> Unit)?) { connectionStateCallback = cb }
+    fun isConnected(): Boolean = socket?.connected() == true
+    fun isConnecting(): Boolean = connecting.get()
 
     // =========================================================
     // Public API
@@ -82,6 +93,12 @@ object PiSocketManager {
         }
 
         // Build a fresh socket, bind *to this instance*, then assign
+        if (baseUrl.isBlank()) {
+            Log.w(TAG, "Connect skipped: baseUrl is blank")
+            connecting.set(false)
+            return
+        }
+
         val s = IO.socket(baseUrl, opts).apply {
             off() // clean slate
 
@@ -184,6 +201,8 @@ object PiSocketManager {
         } finally {
             socket = null
             connecting.set(false)
+            latestPreviewPayload.set(null)
+            previewDecodeScheduled.set(false)
             notifyConnected(false)
         }
     }
@@ -286,11 +305,38 @@ object PiSocketManager {
             s.on(ev) { args ->
                 try {
                     val data = parsePayload(args.firstOrNull())
-                    val (json, bmp) = extractBitmapFromPayload(data) ?: return@on
-                    postToMain { previewImageCallback?.invoke(json, bmp) }
+                    enqueuePreviewDecode(data)
                 } catch (e: Exception) {
                     Log.e(TAG, "preview handler error", e)
                 }
+            }
+        }
+    }
+
+    private fun enqueuePreviewDecode(payload: Any?) {
+        if (payload == null) return
+        latestPreviewPayload.set(payload)
+        schedulePreviewDecodeLoop()
+    }
+
+    private fun schedulePreviewDecodeLoop() {
+        if (!previewDecodeScheduled.compareAndSet(false, true)) return
+        previewDecodeExecutor.execute { drainPreviewFrames() }
+    }
+
+    private fun drainPreviewFrames() {
+        try {
+            while (true) {
+                val next = latestPreviewPayload.getAndSet(null) ?: break
+                val (json, bmp) = extractBitmapFromPayload(next) ?: continue
+                postToMain { previewImageCallback?.invoke(json, bmp) }
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "preview decode loop error", e)
+        } finally {
+            previewDecodeScheduled.set(false)
+            if (latestPreviewPayload.get() != null) {
+                schedulePreviewDecodeLoop()
             }
         }
     }
@@ -312,30 +358,14 @@ object PiSocketManager {
     private fun extractBitmapFromPayload(payload: Any?): Pair<JSONObject, Bitmap>? {
         return when (payload) {
             is JSONObject -> {
-                val b64 = when {
-                    payload.has("image_b64") -> payload.optString("image_b64", "")
-                    payload.has("image")     -> payload.optString("image", "")
-                    else -> ""
-                }
-                if (b64.isBlank()) return null
-                val bytes = decodeBase64(b64) ?: return null
-                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+                val bmp = HighBitDepthImageDecoder.decodePreviewPayload(payload) ?: return null
                 payload to bmp
             }
             is String -> {
-                val bytes = decodeBase64(payload) ?: return null
-                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return null
+                val bmp = HighBitDepthImageDecoder.decodePreviewPayload(payload) ?: return null
                 JSONObject() to bmp
             }
             else -> null
-        }
-    }
-
-    private fun decodeBase64(s: String): ByteArray? {
-        return try {
-            Base64.decode(s, Base64.DEFAULT)
-        } catch (_: IllegalArgumentException) {
-            try { Base64.decode(s, Base64.URL_SAFE) } catch (_: IllegalArgumentException) { null }
         }
     }
 

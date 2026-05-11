@@ -198,7 +198,7 @@ class SessionDetailActivity : AppCompatActivity() {
 
     private fun buildSortedFiles(files: List<File>): List<File> {
         return files.sortedWith(
-            compareBy<File> { file -> if (isDarkImage(file.name)) 0 else 1 }
+            compareBy<File> { file -> if (isDarkImage(file.name)) 1 else 0 }
                 .thenBy { file -> extractImageIndex(file.name) ?: Int.MAX_VALUE }
                 .thenBy { file -> file.name.lowercase(Locale.ROOT) }
         )
@@ -298,7 +298,7 @@ class SessionDetailActivity : AppCompatActivity() {
     }
 
     private fun extractImageIndex(name: String): Int? {
-        val match = Regex("(?i)(?:cal_image_|image_|cal_channel_|frame_)(\\d+)").find(name)
+        val match = Regex("(?i)(?:cal_image_|cal_dark_|image_|cal_channel_|frame_)(\\d+)").find(name)
             ?: return null
         return match.groupValues.getOrNull(1)?.toIntOrNull()
     }

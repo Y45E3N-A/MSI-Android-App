@@ -52,6 +52,12 @@
         android:icon="@drawable/ic_share"
         app:showAsAction="ifRoom" />
 
+    <item
+        android:id="@+id/action_properties_selected"
+        android:title="Properties"
+        android:contentDescription="Show properties for selected items"
+        app:showAsAction="never" />
+
     <!-- Rename selected item -->
     <item
         android:id="@+id/action_rename_inline"

@@ -5,4 +5,5 @@ import androidx.lifecycle.MutableLiveData
 
 object UploadProgressBus {
     val uploadProgress = MutableLiveData<Pair<String, Int>>()
+    val amsiZipBytes = MutableLiveData<Pair<String, Long>>()
 }

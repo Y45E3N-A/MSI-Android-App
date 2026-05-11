@@ -15,6 +15,10 @@
         android:title="Select all"
         android:showAsAction="never" />
     <item
+        android:id="@+id/action_properties_selected"
+        android:title="Properties"
+        android:showAsAction="never" />
+    <item
         android:id="@+id/action_rename_inline"
         android:title="Rename"
         android:showAsAction="never" />

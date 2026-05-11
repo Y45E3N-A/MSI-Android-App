@@ -13,7 +13,6 @@ import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.core.content.ContextCompat
 import androidx.core.content.FileProvider
-import androidx.exifinterface.media.ExifInterface
 import androidx.fragment.app.Fragment
 import androidx.fragment.app.activityViewModels
 import androidx.fragment.app.viewModels
@@ -225,6 +224,7 @@ class GalleryFragment : Fragment() {
     private fun onTopMenuItem(item: MenuItem): Boolean = when (item.itemId) {
         R.id.action_select_all       -> { selectAllVisible(); true }
         R.id.action_share_selected   -> { shareSelected(); true }
+        R.id.action_properties_selected -> { showSelectedProperties(); true }
         R.id.action_delete_selected  -> { deleteSelected(); true }
         R.id.action_rename_inline    -> { promptRenameSelected(); true }
         else -> false
@@ -235,12 +235,13 @@ class GalleryFragment : Fragment() {
         val menu = toolbar.menu
 
         // Title reflects mode
-        toolbar.title = if (inSelectionMode) "$selectedCount selected" else "MFi Android App v3.2"
+        toolbar.title = if (inSelectionMode) "$selectedCount selected" else "MFi Android App v4.0.0"
 
 
 
         // Visibility of actions in header menu
         menu.findItem(R.id.action_share_selected)?.isVisible = inSelectionMode
+        menu.findItem(R.id.action_properties_selected)?.isVisible = inSelectionMode
         menu.findItem(R.id.action_delete_selected)?.isVisible = inSelectionMode
         menu.findItem(R.id.action_select_all)?.isVisible = !inSelectionMode || selectedCount < adapter.currentList.count {
             it !is ResultListItem.InProgress
@@ -285,10 +286,12 @@ class GalleryFragment : Fragment() {
 
     override fun onPrepareOptionsMenu(menu: Menu) {
         val share  = menu.findItem(R.id.action_share_selected)
+        val props  = menu.findItem(R.id.action_properties_selected)
         val delete = menu.findItem(R.id.action_delete_selected)
         val cancel = menu.findItem(R.id.action_cancel_selection)
 
         share?.isVisible  = inSelectionMode
+        props?.isVisible  = inSelectionMode
         delete?.isVisible = inSelectionMode
         cancel?.isVisible = inSelectionMode
         menuItemRenameInline?.isVisible = inSelectionMode && selectedIds.size == 1
@@ -306,6 +309,7 @@ class GalleryFragment : Fragment() {
         // selection actions...
         R.id.action_select_all       -> { selectAllVisible(); true }
         R.id.action_share_selected   -> { shareSelected(); true }
+        R.id.action_properties_selected -> { showSelectedProperties(); true }
         R.id.action_delete_selected  -> { deleteSelected(); true }
         R.id.action_cancel_selection -> { clearSelectionAndExitMode(); true }
         R.id.action_rename_inline    -> { promptRenameSelected(); true }
@@ -605,7 +609,7 @@ class GalleryFragment : Fragment() {
             emptyList<String>()
         }
         return paths.sortedWith(
-            compareBy<String> { path -> if (isDarkCalPath(path)) 0 else 1 }
+            compareBy<String> { path -> if (isDarkCalPath(path)) 1 else 0 }
                 .thenBy { path -> extractCalIndex(path) ?: Int.MAX_VALUE }
                 .thenBy { path -> File(path).name.lowercase(Locale.ROOT) }
         )
@@ -618,7 +622,7 @@ class GalleryFragment : Fragment() {
 
     private fun extractCalIndex(path: String): Int? {
         val name = File(path).name
-        val match = Regex("(?i)cal_image_(\\d+)").find(name) ?: return null
+        val match = Regex("(?i)cal_(?:image|dark)_(\\d+)").find(name) ?: return null
         return match.groupValues.getOrNull(1)?.toIntOrNull()
     }
 
@@ -765,31 +769,136 @@ class GalleryFragment : Fragment() {
         msg("Calibration renamed.")
     }
 
+    private data class SelectedTargets(
+        val sessions: List<Session>,
+        val calibrations: List<CalibrationProfile>
+    )
 
-    // ---------- Share / Delete ----------
-    private fun shareSelected() {
+    private data class SelectionProperties(
+        val selectedItems: Int,
+        val sessionCount: Int,
+        val calibrationCount: Int,
+        val imageCount: Int,
+        val existingFileCount: Int,
+        val missingFileCount: Int,
+        val totalBytes: Long,
+        val averageBytes: Long,
+        val largestBytes: Long
+    )
+
+    private fun collectSelectedTargets(): SelectedTargets {
         val current = adapter.currentList
         val chosen = selectedIds.toSet()
 
         val sessions = mutableListOf<Session>()
         val calibs   = mutableListOf<CalibrationProfile>()
 
-        // Figure out what was selected
         current.forEach { item ->
             when (item) {
                 is ResultListItem.SessionItem -> {
-                    if (chosen.contains(item.session.id)) {
-                        sessions.add(item.session)
-                    }
+                    if (chosen.contains(item.session.id)) sessions.add(item.session)
                 }
                 is ResultListItem.CalibrationItem -> {
-                    if (chosen.contains(stableCalibId(item.profile))) {
-                        calibs.add(item.profile)
-                    }
+                    if (chosen.contains(stableCalibId(item.profile))) calibs.add(item.profile)
                 }
                 is ResultListItem.InProgress -> Unit
             }
         }
+
+        return SelectedTargets(sessions, calibs)
+    }
+
+    private fun computeSelectionProperties(targets: SelectedTargets): SelectionProperties {
+        val calibrationPaths = targets.calibrations.flatMap { calibrationImagePaths(it) }
+        val allPaths = buildList {
+            targets.sessions.forEach { addAll(it.imagePaths) }
+            addAll(calibrationPaths)
+        }
+
+        var totalBytes = 0L
+        var existing = 0
+        var missing = 0
+        var largest = 0L
+
+        allPaths.forEach { path ->
+            val f = File(path)
+            if (!f.exists() || !f.isFile) {
+                missing += 1
+            } else {
+                existing += 1
+                val size = runCatching { f.length() }.getOrDefault(0L)
+                totalBytes += size
+                if (size > largest) largest = size
+            }
+        }
+
+        val average = if (existing > 0) totalBytes / existing else 0L
+
+        return SelectionProperties(
+            selectedItems = targets.sessions.size + targets.calibrations.size,
+            sessionCount = targets.sessions.size,
+            calibrationCount = targets.calibrations.size,
+            imageCount = allPaths.size,
+            existingFileCount = existing,
+            missingFileCount = missing,
+            totalBytes = totalBytes,
+            averageBytes = average,
+            largestBytes = largest
+        )
+    }
+
+    private fun showSelectedProperties() {
+        val targets = collectSelectedTargets()
+        if (targets.sessions.isEmpty() && targets.calibrations.isEmpty()) {
+            msg("No items selected.")
+            return
+        }
+
+        lifecycleScope.launch(Dispatchers.IO) {
+            val props = computeSelectionProperties(targets)
+            withContext(Dispatchers.Main) {
+                val body = buildString {
+                    appendLine("Selected items: ${props.selectedItems}")
+                    appendLine("Sessions: ${props.sessionCount}")
+                    appendLine("Calibrations: ${props.calibrationCount}")
+                    appendLine("Images total: ${props.imageCount}")
+                    appendLine("Files found: ${props.existingFileCount}")
+                    if (props.missingFileCount > 0) {
+                        appendLine("Files missing: ${props.missingFileCount}")
+                    }
+                    appendLine("Total size: ${formatBytesPrecise(props.totalBytes)}")
+                    appendLine("Average image size: ${formatBytesPrecise(props.averageBytes)}")
+                    appendLine("Largest image: ${formatBytesPrecise(props.largestBytes)}")
+                }
+
+                androidx.appcompat.app.AlertDialog.Builder(requireContext())
+                    .setTitle("Selection Properties")
+                    .setMessage(body.trim())
+                    .setPositiveButton("OK", null)
+                    .show()
+            }
+        }
+    }
+
+    private fun formatBytesPrecise(bytes: Long): String {
+        val units = arrayOf("B", "KB", "MB", "GB", "TB")
+        var value = bytes.toDouble().coerceAtLeast(0.0)
+        var unitIndex = 0
+
+        while (value >= 1024.0 && unitIndex < units.lastIndex) {
+            value /= 1024.0
+            unitIndex += 1
+        }
+
+        return String.format(Locale.US, "%.2f %s", value, units[unitIndex])
+    }
+
+
+    // ---------- Share / Delete ----------
+    private fun shareSelected() {
+        val targets = collectSelectedTargets()
+        val sessions = targets.sessions
+        val calibs = targets.calibrations
 
         lifecycleScope.launch(Dispatchers.IO) {
             try {
@@ -858,25 +967,9 @@ class GalleryFragment : Fragment() {
 
 
     private fun deleteSelected() {
-        val current = adapter.currentList
-        val chosen = selectedIds.toSet()
-
-        val sessions = mutableListOf<Session>()
-        val calibs = mutableListOf<CalibrationProfile>()
-
-        current.forEach { item ->
-            when (item) {
-                is ResultListItem.SessionItem ->
-                    if (chosen.contains(item.session.id))
-                        sessions.add(item.session)
-
-                is ResultListItem.CalibrationItem ->
-                    if (chosen.contains(stableCalibId(item.profile)))
-                        calibs.add(item.profile)
-                is ResultListItem.InProgress -> Unit
-            }
-        }
-
+        val targets = collectSelectedTargets()
+        val sessions = targets.sessions
+        val calibs = targets.calibrations
 
         if (sessions.isEmpty() && calibs.isEmpty()) { msg("No items selected."); return }
 
@@ -907,6 +1000,9 @@ class GalleryFragment : Fragment() {
 
                     // Calibrations: DB + prefs
                     calibs.forEach { c ->
+                        val imagePaths = calibrationImagePaths(c)
+                        imagePaths.forEach { path -> runCatching { File(path).delete() } }
+                        runCatching { imagePaths.firstOrNull()?.let { File(it).parentFile?.deleteRecursively() } }
                         prefs.edit().remove(spKeyCalib(c.runId)).apply()
                         runCatching { calibDao.deleteByRunId(c.runId) }
                     }
@@ -929,12 +1025,14 @@ class GalleryFragment : Fragment() {
 
     private fun makeCalibrationJsonFile(profile: CalibrationProfile): File? = runCatching {
         val dir = File(requireContext().cacheDir, "exports").apply { mkdirs() }
-        val file = File(dir, "calibration_${profile.runId}.json")
+        val safeTitle = sanitizeName(displayNameFor(profile)).ifBlank { "Calibration" }
+        val file = File(dir, "calibration_${safeTitle}_${System.currentTimeMillis()}.json")
 
         val wlToNorm = extractCalibrationMap(profile)
 
         val root = JSONObject().apply {
             put("runId", profile.runId)
+            put("displayName", displayNameFor(profile))
             put("summary", profile.summary ?: "")
             put("completedAtMillis", profile.completedAtMillis)
             put("timestampStr", profile.timestampStr)
@@ -1060,7 +1158,11 @@ class GalleryFragment : Fragment() {
 
     private fun buildSessionsZip(sessions: List<Session>): File? = runCatching {
         val cacheDir = File(requireContext().cacheDir, "shares").apply { mkdirs() }
-        val zipFile = File(cacheDir, "sessions_${System.currentTimeMillis()}.zip")
+        val zipBase = when {
+            sessions.size == 1 -> sanitizeName(displayNameFor(sessions.first())).ifBlank { "session" }
+            else -> "sessions_${sessions.size}_items"
+        }
+        val zipFile = File(cacheDir, "${zipBase}_${System.currentTimeMillis()}.zip")
 
         ZipOutputStream(FileOutputStream(zipFile)).use { zos ->
             sessions.forEach { s ->
@@ -1083,16 +1185,11 @@ class GalleryFragment : Fragment() {
                         "img_${String.format(Locale.US, "%04d", idx + 1)}.png"
                     }
 
-                    // copy + (light) EXIF tagging into a temp file
-                    val tempCopy = File(cacheDir, "tmp_${System.nanoTime()}_$outName")
-                    stampExifToCopy(src, tempCopy, s, idx, isStandardAmsi)
-
-                    FileInputStream(tempCopy).use { fis ->
+                    FileInputStream(src).use { fis ->
                         zos.putNextEntry(ZipEntry("$folder/$outName"))
                         fis.copyTo(zos)
                         zos.closeEntry()
                     }
-                    tempCopy.delete()
                 }
             }
         }
@@ -1103,50 +1200,6 @@ class GalleryFragment : Fragment() {
         val wl = wavelengthForIndex(index)
         return if (wl != null) "wl_${wl}.png" else "img_${String.format(Locale.US, "%04d", index + 1)}.png"
     }
-
-    private fun stampExifToCopy(
-        src: File,
-        dst: File,
-        session: Session,
-        indexInSession: Int,
-        isStandardAmsi: Boolean
-    ) {
-        // just byte-copy first
-        FileInputStream(src).use { input ->
-            FileOutputStream(dst).use { output ->
-                input.copyTo(output)
-            }
-        }
-        // Try to enrich EXIF (PNG may have limited support; we best-effort)
-        runCatching {
-            val exif = ExifInterface(dst.absolutePath)
-            val dt = parseSessionDate(session.timestamp)
-            val exifFormat = SimpleDateFormat("dd-MM-yyyy | HH:mm:ss", Locale.US)
-            val dateStr = exifFormat.format(dt)
-
-            exif.setAttribute(ExifInterface.TAG_DATETIME_ORIGINAL, dateStr)
-            exif.setAttribute(ExifInterface.TAG_DATETIME, dateStr)
-
-            val sb = StringBuilder().apply {
-                append("MSI capture; Session ${session.id}; ")
-                append("${session.timestamp}; ")
-                append("Location: ${session.location.ifEmpty { "Unknown" }}")
-                if (isStandardAmsi) {
-                    wavelengthForIndex(indexInSession)?.let { wl ->
-                        append("; Wavelength: ${wl}nm")
-                    }
-                } else {
-                    append("; FrameIndex: ${indexInSession}")
-                }
-                append("; Type: ${session.type}")
-            }
-
-            exif.setAttribute(ExifInterface.TAG_IMAGE_DESCRIPTION, sb.toString())
-            exif.setAttribute(ExifInterface.TAG_USER_COMMENT, sb.toString())
-            exif.saveAttributes()
-        }
-    }
-
 
     private fun displayNameFor(session: Session?): String {
         if (session == null) return "Session ${System.currentTimeMillis()}"
@@ -1162,8 +1215,8 @@ class GalleryFragment : Fragment() {
             // PMFI: show just the interesting PMFI label if we have it.
             session.isPMFI() -> {
                 when {
-                    pmfiBits.isNotEmpty() -> pmfiBits
                     custom.isNotEmpty()   -> custom
+                    pmfiBits.isNotEmpty() -> pmfiBits
                     else                  -> fallbackBaseTitle
                 }
             }
@@ -1187,6 +1240,8 @@ class GalleryFragment : Fragment() {
     }
 
     private fun displayNameFor(profile: CalibrationProfile): String {
+        val custom = prefs.getString(spKeyCalib(profile.runId), "")?.trim().orEmpty()
+        if (custom.isNotEmpty()) return custom
         val num = profile.id ?: stableCalibId(profile)
         return "Calibration $num"
     }

@@ -4,11 +4,9 @@
     android:id="@+id/root_container"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:orientation="vertical">
+    android:orientation="vertical"
+    android:background="?android:attr/colorBackground">
 
-    <!-- =========================
-      TOP BAR: Left-aligned title + larger centered chips below
-      ========================= -->
     <LinearLayout
         android:id="@+id/topBar"
         android:layout_width="match_parent"
@@ -17,214 +15,1353 @@
         android:paddingStart="16dp"
         android:paddingEnd="16dp"
         android:paddingTop="12dp"
-        android:paddingBottom="8dp">
+        android:paddingBottom="10dp">
 
-        <!-- Title (left-aligned) -->
         <TextView
             android:id="@+id/titleText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="MFi Android App v3.2.3"
-            android:textSize="20sp"
-            android:textStyle="normal"
+            android:text="MFi Android App v4.0.0"
             android:textColor="?attr/titleTextColor"
-            android:gravity="start|center_vertical"
-            android:layout_marginBottom="10dp" />
+            android:textSize="20sp"
+            android:textStyle="bold"
+            android:maxLines="1"
+            android:ellipsize="end" />
 
-        <LinearLayout
-            android:id="@+id/chipsRow"
+        <HorizontalScrollView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:orientation="horizontal"
-            android:gravity="center_vertical">
+            android:layout_marginTop="10dp"
+            android:scrollbars="none">
 
-            <com.google.android.material.chip.Chip
-                android:id="@+id/chipBattery"
-                style="@style/Widget.MaterialComponents.Chip.Choice"
-                android:layout_width="0dp"
-                android:layout_height="40dp"
-                android:layout_weight="1"
-                android:minWidth="88dp"
-                android:maxLines="1"
-                android:ellipsize="end"
-                android:textSize="16sp"
-                android:text="— %"
-                android:layout_marginEnd="6dp"
-                app:chipMinHeight="40dp"
-                app:chipCornerRadius="20dp"
-                app:chipIcon="@drawable/ic_battery_unknown_24"
-                app:chipIconVisible="true"
-                app:checkedIconVisible="false"
-                app:chipIconSize="18dp"
-                app:iconStartPadding="6dp" />
+            <LinearLayout
+                android:id="@+id/chipsRow"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:orientation="horizontal">
 
-            <com.google.android.material.chip.Chip
-                android:id="@+id/topTempChip"
-                style="@style/Widget.MaterialComponents.Chip.Choice"
-                android:layout_width="0dp"
-                android:layout_height="40dp"
-                android:layout_weight="1"
-                android:minWidth="88dp"
-                android:maxLines="1"
-                android:ellipsize="end"
-                android:textSize="16sp"
-                android:text="Temp: — °C"
-                android:layout_marginEnd="6dp"
-                app:chipMinHeight="40dp"
-                app:chipCornerRadius="20dp" />
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/chipBattery"
+                    style="@style/Widget.MaterialComponents.Chip.Choice"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:layout_marginEnd="8dp"
+                    android:text="— %"
+                    android:textSize="14sp"
+                    android:maxLines="1"
+                    android:ellipsize="end"
+                    app:chipIcon="@drawable/ic_battery_unknown_24"
+                    app:chipIconVisible="true"
+                    app:checkedIconVisible="false"
+                    app:chipIconSize="18dp"
+                    app:chipCornerRadius="20dp" />
 
-            <com.google.android.material.chip.Chip
-                android:id="@+id/topHumChip"
-                style="@style/Widget.MaterialComponents.Chip.Choice"
-                android:layout_width="0dp"
-                android:layout_height="40dp"
-                android:layout_weight="1"
-                android:minWidth="88dp"
-                android:maxLines="1"
-                android:ellipsize="end"
-                android:textSize="16sp"
-                android:text="RH: — %"
-                app:chipMinHeight="40dp"
-                app:chipCornerRadius="20dp" />
-        </LinearLayout>
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/topTempChip"
+                    style="@style/Widget.MaterialComponents.Chip.Choice"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:layout_marginEnd="8dp"
+                    android:text="Temp: — °C"
+                    android:textSize="14sp"
+                    android:maxLines="1"
+                    android:ellipsize="end"
+                    app:chipCornerRadius="20dp" />
 
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/topHumChip"
+                    style="@style/Widget.MaterialComponents.Chip.Choice"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:text="RH: — %"
+                    android:textSize="14sp"
+                    android:maxLines="1"
+                    android:ellipsize="end"
+                    app:chipCornerRadius="20dp" />
+
+            </LinearLayout>
+        </HorizontalScrollView>
     </LinearLayout>
 
-    <!-- =========================
-         TOP: CONTROLS (scrollable)
-         ========================= -->
     <ScrollView
         android:id="@+id/controls_scrollview"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
         android:fillViewport="true"
-        android:fadeScrollbars="false"
-        android:paddingBottom="72dp"
-        android:clipToPadding="false">
+        android:clipToPadding="false"
+        android:paddingBottom="72dp">
 
         <LinearLayout
             android:id="@+id/controls_container"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:orientation="vertical"
-            android:padding="16dp"
-            android:gravity="center_horizontal">
+            android:padding="16dp">
 
-            <!-- ===== Power / Calibrate ===== -->
-            <LinearLayout
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center"
-                android:layout_marginBottom="12dp">
-
-                <Button
-                    android:id="@+id/buttonShutdown"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Shutdown"
-                    android:contentDescription="Shutdown the instrument" />
-
-                <Space
-                    android:layout_width="12dp"
-                    android:layout_height="1dp" />
-
-                <Button
-                    android:id="@+id/buttonFactoryReset"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Factory Reset"
-                    android:contentDescription="Factory reset the instrument" />
-
-                <Space
-                    android:layout_width="12dp"
-                    android:layout_height="1dp" />
-
-                <Button
-                    android:id="@+id/buttonCalibrate"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Calibrate"
-                    android:contentDescription="Start calibration" />
-            </LinearLayout>
-
-            <!-- ===== IP entry ===== -->
-            <com.google.android.material.textfield.TextInputLayout
-                android:id="@+id/ipInputLayout"
-                style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+            <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:layout_marginBottom="12dp"
-                app:boxBackgroundMode="outline"
-                app:prefixText="Set IP Address: ">
+                android:layout_marginBottom="14dp"
+                app:cardCornerRadius="18dp"
+                app:cardElevation="2dp"
+                app:contentPadding="16dp">
 
-                <com.google.android.material.textfield.TextInputEditText
-                    android:id="@+id/ipAddressInput"
+                <LinearLayout
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:hint="e.g. 192.168.4.1"
-                    android:singleLine="true"
-                    android:imeOptions="actionDone"
-                    android:inputType="numberDecimal|number"
-                    android:digits="0123456789."
-                    android:contentDescription="IP address input" />
-            </com.google.android.material.textfield.TextInputLayout>
+                    android:orientation="vertical">
 
-            <!-- ===== Connect / Disconnect ===== -->
-            <LinearLayout
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Connection"
+                        android:textSize="18sp"
+                        android:textStyle="bold"
+                        android:maxLines="1"
+                        android:ellipsize="end" />
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="10dp"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <View
+                            android:id="@+id/piConnectionDot"
+                            android:layout_width="14dp"
+                            android:layout_height="14dp"
+                            android:layout_marginEnd="8dp"
+                            android:background="@drawable/circle_grey" />
+
+                        <TextView
+                            android:id="@+id/piConnectionStatus"
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="Status: Unknown"
+                            android:textSize="15sp"
+                            android:maxLines="1"
+                            android:ellipsize="end" />
+                    </LinearLayout>
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/ipInputLayout"
+                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:hint="Pi IP address"
+                        app:boxBackgroundMode="outline"
+                        app:hintEnabled="true"
+                        app:hintAnimationEnabled="true"
+                        app:placeholderText="192.168.4.1">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/ipAddressInput"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:minHeight="56dp"
+                            android:singleLine="true"
+                            android:imeOptions="actionDone"
+                            android:inputType="numberDecimal|number"
+                            android:digits="0123456789."
+                            android:paddingStart="16dp"
+                            android:paddingEnd="16dp" />
+
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/setIpButton"
+                            android:layout_width="0dp"
+                            android:layout_height="48dp"
+                            android:layout_weight="1"
+                            android:text="Connect"
+                            android:textSize="14sp"
+                            android:maxLines="1"
+                            android:ellipsize="end"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp" />
+
+                        <Space
+                            android:layout_width="10dp"
+                            android:layout_height="1dp" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/buttonDisconnect"
+                            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                            android:layout_width="0dp"
+                            android:layout_height="48dp"
+                            android:layout_weight="1"
+                            android:text="Abort"
+                            android:textSize="14sp"
+                            android:maxLines="1"
+                            android:ellipsize="end"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp" />
+                    </LinearLayout>
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <com.google.android.material.card.MaterialCardView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:layout_marginBottom="12dp">
+                android:layout_marginBottom="14dp"
+                app:cardCornerRadius="18dp"
+                app:cardElevation="2dp"
+                app:contentPadding="16dp">
 
-                <Button
-                    android:id="@+id/setIpButton"
-                    android:layout_width="0dp"
+                <LinearLayout
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Connect"
-                    android:contentDescription="Connect to Raspberry Pi" />
+                    android:orientation="vertical">
 
-                <Space
-                    android:layout_width="12dp"
-                    android:layout_height="1dp" />
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="Instrument Actions"
+                        android:textSize="18sp"
+                        android:textStyle="bold"
+                        android:maxLines="1"
+                        android:ellipsize="end" />
 
-                <Button
-                    android:id="@+id/buttonDisconnect"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Disconnect/Abort"
-                    android:contentDescription="Disconnect or abort current operation" />
-            </LinearLayout>
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:orientation="horizontal">
 
-            <!-- ===== Connection indicator ===== -->
-            <LinearLayout
-                android:layout_width="wrap_content"
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/buttonCalibrate"
+                            android:layout_width="0dp"
+                            android:layout_height="48dp"
+                            android:layout_weight="1"
+                            android:text="Calibrate"
+                            android:textSize="13sp"
+                            android:maxLines="1"
+                            android:ellipsize="end"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp" />
+
+                        <Space
+                            android:layout_width="8dp"
+                            android:layout_height="1dp" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/buttonFactoryReset"
+                            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                            android:layout_width="0dp"
+                            android:layout_height="48dp"
+                            android:layout_weight="1"
+                            android:text="Reset"
+                            android:textSize="13sp"
+                            android:maxLines="1"
+                            android:ellipsize="end"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp" />
+
+                        <Space
+                            android:layout_width="8dp"
+                            android:layout_height="1dp" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/buttonShutdown"
+                            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                            android:layout_width="0dp"
+                            android:layout_height="48dp"
+                            android:layout_weight="1"
+                            android:text="Power Off"
+                            android:textSize="13sp"
+                            android:maxLines="1"
+                            android:ellipsize="end"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp" />
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/lastPiButtonText"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:text="MFi Button Pressed: --"
+                        android:textSize="15sp"
+                        android:maxLines="1"
+                        android:ellipsize="end" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/previewCard"
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:layout_marginBottom="8dp">
+                android:layout_marginBottom="14dp"
+                app:cardCornerRadius="18dp"
+                app:cardElevation="2dp"
+                app:contentPadding="0dp">
 
-                <View
-                    android:id="@+id/piConnectionDot"
-                    android:layout_width="16dp"
-                    android:layout_height="16dp"
-                    android:background="@drawable/circle_grey"
-                    android:layout_marginEnd="8dp"
-                    android:contentDescription="Pi connection status dot" />
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:paddingStart="16dp"
+                        android:paddingEnd="16dp"
+                        android:paddingTop="14dp"
+                        android:paddingBottom="10dp">
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:id="@+id/previewTitleText"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:text="Camera Preview"
+                                android:textSize="18sp"
+                                android:textStyle="bold"
+                                android:maxLines="1"
+                                android:ellipsize="end" />
+
+                            <TextView
+                                android:id="@+id/previewSubtitleText"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:text="Use preview to align the leaf before capture."
+                                android:textSize="13sp"
+                                android:alpha="0.75"
+                                android:maxLines="2"
+                                android:ellipsize="end" />
+                        </LinearLayout>
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/previewStatusChip"
+                            style="@style/Widget.MaterialComponents.Chip.Choice"
+                            android:layout_width="wrap_content"
+                            android:layout_height="36dp"
+                            android:text="Off"
+                            android:textSize="12sp"
+                            android:maxLines="1"
+                            android:ellipsize="end"
+                            app:chipCornerRadius="18dp" />
+                    </LinearLayout>
+
+                    <FrameLayout
+                        android:id="@+id/previewFrame"
+                        android:layout_width="match_parent"
+                        android:layout_height="240dp"
+                        android:layout_marginStart="16dp"
+                        android:layout_marginEnd="16dp"
+                        android:layout_marginBottom="14dp"
+                        android:background="@android:color/black">
+
+                        <FrameLayout
+                            android:id="@+id/preview_container"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:background="@android:color/black" />
+
+                        <LinearLayout
+                            android:id="@+id/previewEmptyState"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:orientation="vertical"
+                            android:gravity="center"
+                            android:padding="20dp"
+                            android:background="@android:color/black">
+
+                            <TextView
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:text="Preview is off"
+                                android:textColor="@android:color/white"
+                                android:textSize="18sp"
+                                android:textStyle="bold"
+                                android:gravity="center"
+                                android:maxLines="1"
+                                android:ellipsize="end" />
+
+                            <TextView
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="6dp"
+                                android:text="Turn on Camera Preview to check alignment."
+                                android:textColor="@android:color/white"
+                                android:textSize="13sp"
+                                android:alpha="0.75"
+                                android:gravity="center"
+                                android:maxLines="2"
+                                android:ellipsize="end" />
+                        </LinearLayout>
+
+                        <LinearLayout
+                            android:id="@+id/previewLoadingState"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:orientation="vertical"
+                            android:gravity="center"
+                            android:padding="20dp"
+                            android:background="@android:color/black"
+                            android:visibility="gone">
+
+                            <ProgressBar
+                                android:layout_width="42dp"
+                                android:layout_height="42dp"
+                                android:indeterminate="true" />
+
+                            <TextView
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="12dp"
+                                android:text="Starting preview..."
+                                android:textColor="@android:color/white"
+                                android:textSize="14sp"
+                                android:gravity="center"
+                                android:maxLines="1"
+                                android:ellipsize="end" />
+                        </LinearLayout>
+
+                        <LinearLayout
+                            android:id="@+id/previewOverlay"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_gravity="top"
+                            android:orientation="horizontal"
+                            android:gravity="center_vertical"
+                            android:padding="10dp"
+                            android:background="#66000000"
+                            android:visibility="gone">
+
+                            <TextView
+                                android:id="@+id/previewOverlayText"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="Live"
+                                android:textColor="@android:color/white"
+                                android:textSize="13sp"
+                                android:maxLines="1"
+                                android:ellipsize="end" />
+
+                            <TextView
+                                android:id="@+id/previewFpsText"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="2 FPS"
+                                android:textColor="@android:color/white"
+                                android:textSize="12sp"
+                                android:maxLines="1"
+                                android:ellipsize="end" />
+                        </LinearLayout>
+                    </FrameLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:paddingStart="16dp"
+                        android:paddingEnd="16dp"
+                        android:paddingBottom="16dp">
+
+                        <TextView
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="Live camera preview"
+                            android:textSize="15sp"
+                            android:maxLines="1"
+                            android:ellipsize="end" />
+
+                        <Switch
+                            android:id="@+id/switch_camera_preview"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text=""
+                            android:textOn=""
+                            android:textOff="" />
+                    </LinearLayout>
+
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <com.google.android.material.card.MaterialCardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="14dp"
+                app:cardCornerRadius="18dp"
+                app:cardElevation="2dp"
+                app:contentPadding="16dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="AMSI Capture"
+                        android:textSize="18sp"
+                        android:textStyle="bold"
+                        android:maxLines="1"
+                        android:ellipsize="end" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="Capture 16 wavelength images and receive them on this device."
+                        android:textSize="13sp"
+                        android:alpha="0.75" />
+
+                    <LinearLayout
+                        android:id="@+id/amsiControlRow"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/buttonStartAmsi"
+                            android:layout_width="0dp"
+                            android:layout_height="50dp"
+                            android:layout_weight="1"
+                            android:text="Start AMSI"
+                            android:textSize="14sp"
+                            android:maxLines="1"
+                            android:ellipsize="end"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp" />
+
+                        <Space
+                            android:layout_width="12dp"
+                            android:layout_height="1dp" />
+
+                        <LinearLayout
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="4x4 grid"
+                                android:textSize="12sp"
+                                android:maxLines="1"
+                                android:ellipsize="end" />
+
+                            <Switch
+                                android:id="@+id/switchAmsiSocketPreview"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text=""
+                                android:textOn=""
+                                android:textOff="" />
+                        </LinearLayout>
+                    </LinearLayout>
+
+                    <TextView
+                        android:id="@+id/amsiSocketPreviewHint"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="8dp"
+                        android:text="4x4 grid sends preview images during AMSI and may slow capture."
+                        android:textSize="12sp"
+                        android:alpha="0.7" />
+
+                    <ProgressBar
+                        android:id="@+id/captureProgressBar"
+                        style="?android:attr/progressBarStyleHorizontal"
+                        android:layout_width="match_parent"
+                        android:layout_height="8dp"
+                        android:layout_marginTop="14dp"
+                        android:max="16"
+                        android:visibility="gone" />
+
+                    <TextView
+                        android:id="@+id/captureProgressText"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:text=""
+                        android:textSize="13sp"
+                        android:gravity="end"
+                        android:visibility="gone" />
+
+                    <ProgressBar
+                        android:id="@+id/calProgressBar"
+                        style="?android:attr/progressBarStyleHorizontal"
+                        android:layout_width="match_parent"
+                        android:layout_height="8dp"
+                        android:layout_marginTop="10dp"
+                        android:max="16"
+                        android:visibility="gone" />
+
+                    <TextView
+                        android:id="@+id/calProgressText"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:text=""
+                        android:textSize="13sp"
+                        android:gravity="end"
+                        android:visibility="gone" />
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/amsiGridCard"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="14dp"
+                android:visibility="gone"
+                app:cardCornerRadius="18dp"
+                app:cardElevation="2dp"
+                app:contentPadding="16dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical">
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:id="@+id/amsiGridTitleText"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:text="AMSI 4x4 Preview"
+                                android:textSize="18sp"
+                                android:textStyle="bold"
+                                android:maxLines="1"
+                                android:ellipsize="end" />
+
+                            <TextView
+                                android:id="@+id/amsiGridSubtitleText"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:text="Wavelength images appear as they arrive."
+                                android:textSize="13sp"
+                                android:alpha="0.75"
+                                android:maxLines="2"
+                                android:ellipsize="end" />
+                        </LinearLayout>
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/amsiGridStatusChip"
+                            style="@style/Widget.MaterialComponents.Chip.Choice"
+                            android:layout_width="wrap_content"
+                            android:layout_height="36dp"
+                            android:text="0/16"
+                            android:textSize="12sp"
+                            android:maxLines="1"
+                            android:ellipsize="end"
+                            app:chipCornerRadius="18dp" />
+                    </LinearLayout>
+
+                    <ProgressBar
+                        android:id="@+id/amsiGridProgressBar"
+                        style="?android:attr/progressBarStyleHorizontal"
+                        android:layout_width="match_parent"
+                        android:layout_height="8dp"
+                        android:layout_marginTop="12dp"
+                        android:max="16"
+                        android:progress="0" />
+
+                    <GridLayout
+                        android:id="@+id/amsiPreviewGrid"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:columnCount="4"
+                        android:rowCount="4"
+                        android:useDefaultMargins="true"
+                        android:alignmentMode="alignBounds">
+
+                        <FrameLayout
+                            android:id="@+id/amsiTile01"
+                            android:layout_width="0dp"
+                            android:layout_height="74dp"
+                            android:layout_columnWeight="1"
+                            android:background="@android:color/black">
+
+                            <ImageView
+                                android:id="@+id/amsiTileImage01"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:scaleType="centerCrop" />
+
+                            <TextView
+                                android:id="@+id/amsiTileLabel01"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="bottom"
+                                android:background="#66000000"
+                                android:text="395"
+                                android:textColor="@android:color/white"
+                                android:textSize="10sp"
+                                android:gravity="center" />
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:id="@+id/amsiTile02"
+                            android:layout_width="0dp"
+                            android:layout_height="74dp"
+                            android:layout_columnWeight="1"
+                            android:background="@android:color/black">
+
+                            <ImageView
+                                android:id="@+id/amsiTileImage02"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:scaleType="centerCrop" />
+
+                            <TextView
+                                android:id="@+id/amsiTileLabel02"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="bottom"
+                                android:background="#66000000"
+                                android:text="415"
+                                android:textColor="@android:color/white"
+                                android:textSize="10sp"
+                                android:gravity="center" />
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:id="@+id/amsiTile03"
+                            android:layout_width="0dp"
+                            android:layout_height="74dp"
+                            android:layout_columnWeight="1"
+                            android:background="@android:color/black">
+
+                            <ImageView
+                                android:id="@+id/amsiTileImage03"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:scaleType="centerCrop" />
+
+                            <TextView
+                                android:id="@+id/amsiTileLabel03"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="bottom"
+                                android:background="#66000000"
+                                android:text="450"
+                                android:textColor="@android:color/white"
+                                android:textSize="10sp"
+                                android:gravity="center" />
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:id="@+id/amsiTile04"
+                            android:layout_width="0dp"
+                            android:layout_height="74dp"
+                            android:layout_columnWeight="1"
+                            android:background="@android:color/black">
+
+                            <ImageView
+                                android:id="@+id/amsiTileImage04"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:scaleType="centerCrop" />
+
+                            <TextView
+                                android:id="@+id/amsiTileLabel04"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="bottom"
+                                android:background="#66000000"
+                                android:text="470"
+                                android:textColor="@android:color/white"
+                                android:textSize="10sp"
+                                android:gravity="center" />
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:id="@+id/amsiTile05"
+                            android:layout_width="0dp"
+                            android:layout_height="74dp"
+                            android:layout_columnWeight="1"
+                            android:background="@android:color/black">
+
+                            <ImageView
+                                android:id="@+id/amsiTileImage05"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:scaleType="centerCrop" />
+
+                            <TextView
+                                android:id="@+id/amsiTileLabel05"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="bottom"
+                                android:background="#66000000"
+                                android:text="505"
+                                android:textColor="@android:color/white"
+                                android:textSize="10sp"
+                                android:gravity="center" />
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:id="@+id/amsiTile06"
+                            android:layout_width="0dp"
+                            android:layout_height="74dp"
+                            android:layout_columnWeight="1"
+                            android:background="@android:color/black">
+
+                            <ImageView
+                                android:id="@+id/amsiTileImage06"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:scaleType="centerCrop" />
+
+                            <TextView
+                                android:id="@+id/amsiTileLabel06"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="bottom"
+                                android:background="#66000000"
+                                android:text="528"
+                                android:textColor="@android:color/white"
+                                android:textSize="10sp"
+                                android:gravity="center" />
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:id="@+id/amsiTile07"
+                            android:layout_width="0dp"
+                            android:layout_height="74dp"
+                            android:layout_columnWeight="1"
+                            android:background="@android:color/black">
+
+                            <ImageView
+                                android:id="@+id/amsiTileImage07"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:scaleType="centerCrop" />
+
+                            <TextView
+                                android:id="@+id/amsiTileLabel07"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="bottom"
+                                android:background="#66000000"
+                                android:text="555"
+                                android:textColor="@android:color/white"
+                                android:textSize="10sp"
+                                android:gravity="center" />
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:id="@+id/amsiTile08"
+                            android:layout_width="0dp"
+                            android:layout_height="74dp"
+                            android:layout_columnWeight="1"
+                            android:background="@android:color/black">
+
+                            <ImageView
+                                android:id="@+id/amsiTileImage08"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:scaleType="centerCrop" />
+
+                            <TextView
+                                android:id="@+id/amsiTileLabel08"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="bottom"
+                                android:background="#66000000"
+                                android:text="570"
+                                android:textColor="@android:color/white"
+                                android:textSize="10sp"
+                                android:gravity="center" />
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:id="@+id/amsiTile09"
+                            android:layout_width="0dp"
+                            android:layout_height="74dp"
+                            android:layout_columnWeight="1"
+                            android:background="@android:color/black">
+
+                            <ImageView
+                                android:id="@+id/amsiTileImage09"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:scaleType="centerCrop" />
+
+                            <TextView
+                                android:id="@+id/amsiTileLabel09"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="bottom"
+                                android:background="#66000000"
+                                android:text="590"
+                                android:textColor="@android:color/white"
+                                android:textSize="10sp"
+                                android:gravity="center" />
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:id="@+id/amsiTile10"
+                            android:layout_width="0dp"
+                            android:layout_height="74dp"
+                            android:layout_columnWeight="1"
+                            android:background="@android:color/black">
+
+                            <ImageView
+                                android:id="@+id/amsiTileImage10"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:scaleType="centerCrop" />
+
+                            <TextView
+                                android:id="@+id/amsiTileLabel10"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="bottom"
+                                android:background="#66000000"
+                                android:text="610"
+                                android:textColor="@android:color/white"
+                                android:textSize="10sp"
+                                android:gravity="center" />
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:id="@+id/amsiTile11"
+                            android:layout_width="0dp"
+                            android:layout_height="74dp"
+                            android:layout_columnWeight="1"
+                            android:background="@android:color/black">
+
+                            <ImageView
+                                android:id="@+id/amsiTileImage11"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:scaleType="centerCrop" />
+
+                            <TextView
+                                android:id="@+id/amsiTileLabel11"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="bottom"
+                                android:background="#66000000"
+                                android:text="625"
+                                android:textColor="@android:color/white"
+                                android:textSize="10sp"
+                                android:gravity="center" />
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:id="@+id/amsiTile12"
+                            android:layout_width="0dp"
+                            android:layout_height="74dp"
+                            android:layout_columnWeight="1"
+                            android:background="@android:color/black">
+
+                            <ImageView
+                                android:id="@+id/amsiTileImage12"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:scaleType="centerCrop" />
+
+                            <TextView
+                                android:id="@+id/amsiTileLabel12"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="bottom"
+                                android:background="#66000000"
+                                android:text="640"
+                                android:textColor="@android:color/white"
+                                android:textSize="10sp"
+                                android:gravity="center" />
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:id="@+id/amsiTile13"
+                            android:layout_width="0dp"
+                            android:layout_height="74dp"
+                            android:layout_columnWeight="1"
+                            android:background="@android:color/black">
+
+                            <ImageView
+                                android:id="@+id/amsiTileImage13"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:scaleType="centerCrop" />
+
+                            <TextView
+                                android:id="@+id/amsiTileLabel13"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="bottom"
+                                android:background="#66000000"
+                                android:text="660"
+                                android:textColor="@android:color/white"
+                                android:textSize="10sp"
+                                android:gravity="center" />
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:id="@+id/amsiTile14"
+                            android:layout_width="0dp"
+                            android:layout_height="74dp"
+                            android:layout_columnWeight="1"
+                            android:background="@android:color/black">
+
+                            <ImageView
+                                android:id="@+id/amsiTileImage14"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:scaleType="centerCrop" />
+
+                            <TextView
+                                android:id="@+id/amsiTileLabel14"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="bottom"
+                                android:background="#66000000"
+                                android:text="730"
+                                android:textColor="@android:color/white"
+                                android:textSize="10sp"
+                                android:gravity="center" />
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:id="@+id/amsiTile15"
+                            android:layout_width="0dp"
+                            android:layout_height="74dp"
+                            android:layout_columnWeight="1"
+                            android:background="@android:color/black">
+
+                            <ImageView
+                                android:id="@+id/amsiTileImage15"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:scaleType="centerCrop" />
+
+                            <TextView
+                                android:id="@+id/amsiTileLabel15"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="bottom"
+                                android:background="#66000000"
+                                android:text="850"
+                                android:textColor="@android:color/white"
+                                android:textSize="10sp"
+                                android:gravity="center" />
+                        </FrameLayout>
+
+                        <FrameLayout
+                            android:id="@+id/amsiTile16"
+                            android:layout_width="0dp"
+                            android:layout_height="74dp"
+                            android:layout_columnWeight="1"
+                            android:background="@android:color/black">
+
+                            <ImageView
+                                android:id="@+id/amsiTileImage16"
+                                android:layout_width="match_parent"
+                                android:layout_height="match_parent"
+                                android:scaleType="centerCrop" />
+
+                            <TextView
+                                android:id="@+id/amsiTileLabel16"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_gravity="bottom"
+                                android:background="#66000000"
+                                android:text="880"
+                                android:textColor="@android:color/white"
+                                android:textSize="10sp"
+                                android:gravity="center" />
+                        </FrameLayout>
+
+                    </GridLayout>
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <com.google.android.material.card.MaterialCardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="14dp"
+                app:cardCornerRadius="18dp"
+                app:cardElevation="2dp"
+                app:contentPadding="16dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/pmfiHeader"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="PMFI Setup"
+                        android:textSize="18sp"
+                        android:textStyle="bold"
+                        android:maxLines="1"
+                        android:ellipsize="end" />
+
+                    <TextView
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="4dp"
+                        android:text="Upload an INI plan before starting PMFI."
+                        android:textSize="13sp"
+                        android:alpha="0.75" />
+
+                    <com.google.android.material.textfield.TextInputLayout
+                        android:id="@+id/pmfiIniLayout"
+                        style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="16dp"
+                        android:hint="Paste your [pmfi] INI here"
+                        app:boxBackgroundMode="outline"
+                        app:endIconMode="clear_text"
+                        app:hintEnabled="true"
+                        app:hintAnimationEnabled="true">
+
+                        <com.google.android.material.textfield.TextInputEditText
+                            android:id="@+id/pmfiIniEdit"
+                            android:layout_width="match_parent"
+                            android:layout_height="140dp"
+                            android:gravity="top|start"
+                            android:inputType="textMultiLine"
+                            android:overScrollMode="ifContentScrolls"
+                            android:paddingStart="16dp"
+                            android:paddingTop="18dp"
+                            android:paddingEnd="16dp"
+                            android:paddingBottom="16dp"
+                            android:scrollbars="vertical"
+                            android:textSize="14sp" />
+
+                    </com.google.android.material.textfield.TextInputLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="12dp"
+                        android:orientation="horizontal">
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/pmfiExpandBtn"
+                            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                            android:layout_width="0dp"
+                            android:layout_height="48dp"
+                            android:layout_weight="1"
+                            android:text="Expand"
+                            android:textSize="13sp"
+                            android:maxLines="1"
+                            android:ellipsize="end"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp" />
+
+                        <Space
+                            android:layout_width="8dp"
+                            android:layout_height="1dp" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/pmfiUploadIniBtn"
+                            android:layout_width="0dp"
+                            android:layout_height="48dp"
+                            android:layout_weight="1"
+                            android:text="Upload"
+                            android:textSize="13sp"
+                            android:maxLines="1"
+                            android:ellipsize="end"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp" />
+
+                        <Space
+                            android:layout_width="8dp"
+                            android:layout_height="1dp" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/pmfiStartBtn"
+                            android:layout_width="0dp"
+                            android:layout_height="48dp"
+                            android:layout_weight="1"
+                            android:text="Start"
+                            android:textSize="13sp"
+                            android:maxLines="1"
+                            android:ellipsize="end"
+                            android:enabled="false"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp" />
+                    </LinearLayout>
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <com.google.android.material.card.MaterialCardView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="14dp"
+                app:cardCornerRadius="18dp"
+                app:cardElevation="2dp"
+                app:contentPadding="16dp">
+
+                <LinearLayout
+                    android:id="@+id/pmfi_status_row"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <TextView
+                        android:id="@+id/pmfiSectionLabel"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:text="PMFI idle"
+                        android:textSize="16sp"
+                        android:textStyle="bold"
+                        android:maxLines="1"
+                        android:ellipsize="end" />
+
+                    <TextView
+                        android:id="@+id/pmfiStageLabel"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="2dp"
+                        android:text=""
+                        android:textSize="13sp"
+                        android:alpha="0.75"
+                        android:maxLines="2"
+                        android:ellipsize="end" />
+
+                    <ProgressBar
+                        android:id="@+id/pmfiProgressBar"
+                        style="?android:attr/progressBarStyleHorizontal"
+                        android:layout_width="match_parent"
+                        android:layout_height="8dp"
+                        android:layout_marginTop="10dp"
+                        android:max="100"
+                        android:progress="0"
+                        android:indeterminate="false" />
+
+                    <TextView
+                        android:id="@+id/pmfiCounter"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_marginTop="6dp"
+                        android:text="0 / 0 (0%)"
+                        android:textSize="13sp"
+                        android:gravity="end"
+                        android:maxLines="1"
+                        android:ellipsize="end" />
+
+                    <View
+                        android:layout_width="match_parent"
+                        android:layout_height="1dp"
+                        android:layout_marginTop="14dp"
+                        android:layout_marginBottom="14dp"
+                        android:alpha="0.2"
+                        android:background="?android:attr/textColorSecondary" />
+
+                    <LinearLayout
+                        android:id="@+id/pmfi_section_card"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:id="@+id/tvSectionsCount"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:text="Sections: 0/0"
+                            android:textSize="14sp"
+                            android:textStyle="bold"
+                            android:gravity="end"
+                            android:maxLines="1"
+                            android:ellipsize="end" />
+
+                        <TextView
+                            android:id="@+id/tvSectionInfo"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:text="—"
+                            android:textSize="12sp"
+                            android:alpha="0.8"
+                            android:maxLines="2"
+                            android:ellipsize="end" />
+
+                        <ProgressBar
+                            android:id="@+id/pbSection"
+                            style="?android:attr/progressBarStyleHorizontal"
+                            android:layout_width="match_parent"
+                            android:layout_height="8dp"
+                            android:layout_marginTop="10dp"
+                            android:max="100" />
+
+                        <TextView
+                            android:id="@+id/tvSectionFrames"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="6dp"
+                            android:text="0/0 (0%) in this zip"
+                            android:textSize="13sp"
+                            android:maxLines="1"
+                            android:ellipsize="end" />
+                    </LinearLayout>
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <ScrollView
+                android:id="@+id/pmfiLogContainer"
+                android:layout_width="match_parent"
+                android:layout_height="100dp"
+                android:fillViewport="true"
+                android:visibility="gone">
 
                 <TextView
-                    android:id="@+id/piConnectionStatus"
-                    android:layout_width="wrap_content"
+                    android:id="@+id/pmfiLog"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:text="Status: Unknown"
-                    android:textSize="16sp" />
-            </LinearLayout>
+                    android:textIsSelectable="true"
+                    android:textSize="12sp"
+                    android:typeface="monospace"
+                    android:paddingTop="4dp"
+                    android:paddingBottom="4dp" />
+            </ScrollView>
 
-            <!-- Hidden legacy env labels (kept for compatibility with binding) -->
+            <TextView
+                android:id="@+id/pmfiStatusText"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:text=""
+                android:paddingTop="6dp"
+                android:textIsSelectable="true"
+                android:visibility="gone" />
+
             <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
@@ -248,288 +1385,15 @@
                     android:text="RH: —" />
             </LinearLayout>
 
-            <TextView
-                android:id="@+id/lastPiButtonText"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text="MFi Button Pressed: --"
-                android:textSize="18sp"
-                android:layout_marginBottom="20dp" />
-
-            <!-- ===== AMSI ===== -->
-            <Button
-                android:id="@+id/buttonStartAmsi"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Start AMSI"
-                android:layout_marginBottom="12dp"
-                android:contentDescription="Start AMSI capture" />
-
-            <!-- ===== Live preview toggle ===== -->
-            <Switch
-                android:id="@+id/switch_camera_preview"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="Camera Preview"
-                android:textOn="Camera Preview ON"
-                android:textOff="Camera Preview OFF"
-                android:layout_marginBottom="16dp"
-                android:contentDescription="Toggle live camera preview" />
-
-            <!-- ===== AMSI progress ===== -->
-            <ProgressBar
-                android:id="@+id/captureProgressBar"
-                style="?android:attr/progressBarStyleHorizontal"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:max="16"
-                android:visibility="gone" />
-
-            <TextView
-                android:id="@+id/captureProgressText"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text=""
-                android:visibility="gone"
-                android:layout_marginBottom="20dp" />
-
-            <!-- ===== Calibration progress ===== -->
-            <ProgressBar
-                android:id="@+id/calProgressBar"
-                style="?android:attr/progressBarStyleHorizontal"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:max="16"
-                android:visibility="gone" />
-
-            <TextView
-                android:id="@+id/calProgressText"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:text=""
-                android:visibility="gone" />
-
-            <!-- ===============================
-                 PMFI (INI-only) + Expand button
-                 =============================== -->
-            <TextView
-                android:id="@+id/pmfiHeader"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text="PMFI (MSI v2.1+ only)"
-                android:textStyle="bold"
-                android:textSize="18sp"
-                android:layout_marginTop="16dp"
-                android:layout_marginBottom="6dp" />
-
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:gravity="center_vertical"
-                android:layout_marginBottom="12dp">
-
-                <com.google.android.material.textfield.TextInputLayout
-                    android:id="@+id/pmfiIniLayout"
-                    style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    app:boxBackgroundMode="outline"
-                    app:endIconMode="clear_text">
-
-                    <com.google.android.material.textfield.TextInputEditText
-                        android:id="@+id/pmfiIniEdit"
-                        android:layout_width="match_parent"
-                        android:layout_height="140dp"
-                        android:gravity="top|start"
-                        android:hint="Paste your [pmfi] INI here"
-                        android:inputType="textMultiLine"
-                        android:overScrollMode="always"
-                        android:scrollbars="vertical"
-                        android:contentDescription="PMFI INI text input" />
-                </com.google.android.material.textfield.TextInputLayout>
-
-                <com.google.android.material.button.MaterialButton
-                    android:id="@+id/pmfiExpandBtn"
-                    style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:text="Expand"
-                    android:layout_marginStart="8dp"
-                    android:minWidth="0dp"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp"
-                    android:contentDescription="Open full-screen PMFI INI editor" />
-            </LinearLayout>
-
-            <!-- ===== PMFI actions ===== -->
-            <LinearLayout
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:layout_marginTop="8dp">
-
-                <Button
-                    android:id="@+id/pmfiUploadIniBtn"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Upload INI"
-                    android:contentDescription="Upload PMFI INI to Pi" />
-
-                <Space
-                    android:layout_width="8dp"
-                    android:layout_height="1dp" />
-
-                <Button
-                    android:id="@+id/pmfiStartBtn"
-                    android:layout_width="0dp"
-                    android:layout_height="wrap_content"
-                    android:layout_weight="1"
-                    android:text="Start PMFI"
-                    android:enabled="false"
-                    android:contentDescription="Start PMFI run" />
-            </LinearLayout>
-
-            <!-- ===== PMFI status strip (GLOBAL progress) ===== -->
-            <LinearLayout
-                android:id="@+id/pmfi_status_row"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:paddingTop="8dp"
-                android:paddingBottom="8dp">
-
-                <TextView
-                    android:id="@+id/pmfiSectionLabel"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="PMFI idle"
-                    android:textStyle="bold" />
-
-                <TextView
-                    android:id="@+id/pmfiStageLabel"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="" />
-
-                <ProgressBar
-                    android:id="@+id/pmfiProgressBar"
-                    style="?android:attr/progressBarStyleHorizontal"
-                    android:layout_width="match_parent"
-                    android:layout_height="6dp"
-                    android:max="100"
-                    android:progress="0"
-                    android:indeterminate="false" />
-
-                <TextView
-                    android:id="@+id/pmfiCounter"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="0 / 0 (0%)"
-                    android:gravity="end"
-                    android:layout_marginTop="2dp" />
-            </LinearLayout>
-
-            <!-- ===== PMFI Section Card (PER-SECTION progress) ===== -->
-            <LinearLayout
-                android:id="@+id/pmfi_section_card"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:orientation="vertical"
-                android:paddingTop="8dp"
-                android:paddingBottom="8dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="horizontal">
-
-                    <TextView
-                        android:id="@+id/tvSectionsCount"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:gravity="end"
-                        android:text="Sections: 0/0" />
-                </LinearLayout>
-
-                <TextView
-                    android:id="@+id/tvSectionInfo"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="—"
-                    android:textSize="12sp"
-                    android:alpha="0.8"
-                    android:layout_marginTop="2dp" />
-
-                <ProgressBar
-                    android:id="@+id/pbSection"
-                    style="?android:attr/progressBarStyleHorizontal"
-                    android:layout_width="match_parent"
-                    android:layout_height="8dp"
-                    android:max="100"
-                    android:layout_marginTop="8dp" />
-
-                <TextView
-                    android:id="@+id/tvSectionFrames"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:text="0/0 (0%) in this zip"
-                    android:layout_marginTop="4dp" />
-            </LinearLayout>
-
-            <!-- ===== Optional: mini console for pmfi.log ===== -->
-            <ScrollView
-                android:id="@+id/pmfiLogContainer"
-                android:layout_width="match_parent"
-                android:layout_height="100dp"
-                android:fillViewport="true"
-                android:visibility="gone">
-
-                <TextView
-                    android:id="@+id/pmfiLog"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:textIsSelectable="true"
-                    android:textSize="12sp"
-                    android:typeface="monospace"
-                    android:paddingTop="4dp"
-                    android:paddingBottom="4dp" />
-            </ScrollView>
-
-            <!-- Legacy status text (hidden) -->
-            <TextView
-                android:id="@+id/pmfiStatusText"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:text=""
-                android:paddingTop="6dp"
-                android:textIsSelectable="true"
-                android:visibility="gone" />
-
         </LinearLayout>
     </ScrollView>
 
-    <!-- =========================
-         BOTTOM: PREVIEW (scroll)
-         ========================= -->
     <ScrollView
         android:id="@+id/preview_scrollview"
         android:layout_width="match_parent"
         android:layout_height="0dp"
         android:layout_weight="1"
-        android:fillViewport="true"
-        android:paddingBottom="72dp"
-        android:clipToPadding="false"
         android:visibility="gone"
-        android:fadeScrollbars="false">
-
-        <FrameLayout
-            android:id="@+id/preview_container"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:background="@android:color/black" />
-    </ScrollView>
+        android:fillViewport="true" />
 
 </LinearLayout>

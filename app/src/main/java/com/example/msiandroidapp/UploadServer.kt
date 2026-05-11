@@ -221,6 +221,14 @@ class UploadServer(
             }
 
             // ── 2) PMFI ZIP ────────────────────────────────────────────────────────────────────────
+            if (mode == "amsi" && looksLikeZip(fileNameHint, contentType, tmpFile)) {
+                return handleAmsiZip(
+                    sessionId = (params["runId"] ?: sessionId),
+                    zipFilename = fileNameHint,
+                    tmpFile = tmpFile
+                )
+            }
+
             if (mode == "pmfi" && looksLikeZip(fileNameHint, contentType, tmpFile)) {
                 return handlePmfiZip(
                     sessionId = (params["runId"] ?: sessionId),
@@ -502,6 +510,64 @@ class UploadServer(
     }
 
     // --------------------------------------------------------------------------------------------
+    // AMSI ZIP handler
+    // --------------------------------------------------------------------------------------------
+    private fun handleAmsiZip(
+        sessionId: String,
+        zipFilename: String,
+        tmpFile: File
+    ): Response {
+        val sessionDir = File(sessionsRoot, sessionId).apply { mkdirs() }
+        val savedZip = File(sessionDir, zipFilename.ifBlank { "${sessionId}_amsi.zip" })
+
+        try {
+            Log.i(TAG, "AMSI ZIP: saving -> ${savedZip.absolutePath}")
+            tmpFile.copyTo(savedZip, overwrite = true)
+        } finally {
+            tmpFile.delete()
+        }
+
+        val zipBytes = savedZip.length()
+        val extractedPngs = unzipPngs(savedZip, sessionDir)
+        runCatching {
+            if (savedZip.exists() && !savedZip.delete()) {
+                Log.w(TAG, "AMSI ZIP delete failed after extraction: ${savedZip.absolutePath}")
+            }
+        }.onFailure { e ->
+            Log.w(TAG, "AMSI ZIP delete error after extraction: ${e.message}")
+        }
+
+        if (extractedPngs.isEmpty()) {
+            Log.w(TAG, "AMSI ZIP contained no PNG files: ${savedZip.absolutePath}")
+            return badRequest("AMSI ZIP contained no PNG files")
+        }
+
+        val sortedPngs = extractedPngs.sortedBy { File(it).name.lowercase(Locale.ROOT) }
+        UploadProgressBus.amsiZipBytes.postValue(sessionId to zipBytes)
+        UploadProgressBus.uploadProgress.postValue(sessionId to sortedPngs.size)
+        lastSeenAt[sessionId] = System.currentTimeMillis()
+        finalisedKeys.add(sessionId)
+
+        if (sortedPngs.size == IMAGES_PER_AMSI) {
+            insertSessionAsync(
+                key = sessionId,
+                imagePaths = sortedPngs,
+                type = "AMSI",
+                label = null,
+                completedAtMillis = System.currentTimeMillis(),
+                runId = sessionId
+            )
+            amsiUploads.remove(sessionId)
+            lastSeenAt.remove(sessionId)
+        } else {
+            Log.w(TAG, "AMSI ZIP extracted ${sortedPngs.size}/$IMAGES_PER_AMSI PNGs for session=$sessionId")
+        }
+
+        cleanupStaleSessions()
+        return ok("AMSI ZIP accepted (${sortedPngs.size} images): $zipFilename")
+    }
+
+    // --------------------------------------------------------------------------------------------
     // PMFI ZIP handler
     // --------------------------------------------------------------------------------------------
     private fun handlePmfiZip(
@@ -769,7 +835,7 @@ class UploadServer(
                 zf.getInputStream(e).use { input ->
                     target.outputStream().use { output -> input.copyTo(output) }
                 }
-                Log.i(TAG, "PMFI ZIP: extracted PNG -> ${target.absolutePath}")
+                Log.i(TAG, "ZIP: extracted PNG -> ${target.absolutePath}")
                 out.add(target.absolutePath)
             }
         }

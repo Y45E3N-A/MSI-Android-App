@@ -1,7 +1,6 @@
 package com.example.msiandroidapp.ui.gallery
 
 import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.net.Uri
 import android.view.LayoutInflater
 import android.view.View
@@ -10,6 +9,7 @@ import android.widget.ImageView
 import android.widget.TextView
 import androidx.recyclerview.widget.RecyclerView
 import com.example.msiandroidapp.R
+import com.example.msiandroidapp.util.HighBitDepthImageDecoder
 import java.io.File
 
 class ImagePagerAdapter(
@@ -45,13 +45,7 @@ class ImagePagerAdapter(
         private fun decodeBitmap(uri: Uri): Bitmap? {
             val path = uri.path ?: return null
             val file = File(path)
-            if (!file.isFile || file.length() <= 0L) return null
-
-            val opts = BitmapFactory.Options().apply {
-                inPreferredConfig = Bitmap.Config.ARGB_8888
-                inDither = false
-            }
-            return BitmapFactory.decodeFile(file.absolutePath, opts)
+            return HighBitDepthImageDecoder.decodeFile(file)
         }
     }
 }
