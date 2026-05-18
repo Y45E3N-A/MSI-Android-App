@@ -3,12 +3,11 @@
     android:layout_height="match_parent"
     android:background="#111111">
 
-    <ImageView
+    <com.example.msiandroidapp.ui.gallery.ZoomableImageView
         android:id="@+id/pager_image_view"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:adjustViewBounds="true"
-        android:scaleType="fitCenter" />
+        android:adjustViewBounds="true" />
 
     <TextView
         android:id="@+id/pager_image_title"

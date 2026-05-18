@@ -100,6 +100,7 @@ class ControlFragment : Fragment() {
     private var calExtraImagesExpected = 0
     private var calDarkImagesUploaded = 0
     private var calInfoLine: String = ""
+    private var calStageLine: String = ""
     private var calExpectedImages = 16
     private var calTotalChannels = 16
 
@@ -287,6 +288,32 @@ class ControlFragment : Fragment() {
             }
         }
     }
+
+    private fun amsiPreviewIndex(data: JSONObject): Int {
+        var idx = data.optInt("index", -1)
+        if (idx !in 0..15) idx = data.optInt("idx", -1)
+        if (idx !in 0..15) idx = data.optInt("i", -1)
+        if (idx !in 0..15) idx = data.optInt("channel", -1)
+        if (idx !in 0..15) idx = data.optInt("led", -1)
+        return idx
+    }
+
+    private fun addAmsiGridBitmap(data: JSONObject, bmp: Bitmap) {
+        var idx = amsiPreviewIndex(data)
+
+        if (idx !in 0..15) {
+            val current = vm.capturedBitmaps.value ?: List(16) { null }
+            idx = current.indexOfFirst { it == null }.takeIf { it >= 0 } ?: -1
+        }
+
+        if (idx in 0..15) {
+            if (mode != PreviewMode.AMSI_GRID) {
+                mode = PreviewMode.AMSI_GRID
+                showAmsiGrid()
+            }
+            vm.addBitmap(idx, bmp)
+        }
+    }
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
 
@@ -415,14 +442,13 @@ class ControlFragment : Fragment() {
             val j = payload as? JSONObject ?: return@on
             val channels = j.optInt("channels", 16)
             val darkExpected = j.optInt("dark_images_expected", 0)
-            val totalExpected = j.optInt("images_expected", channels + darkExpected)
             if (!isAdded) return@on
             requireActivity().runOnUiThread {
                 calTotalChannels = channels
                 vm.startCalibration(totalChannels = channels)
                 calDarkFrameSeen = darkExpected > 0
                 calExtraImagesExpected = darkExpected.coerceAtLeast(0)
-                calExpectedImages = totalExpected.coerceAtLeast(channels)
+                calExpectedImages = channels.coerceAtLeast(1)
                 calDarkImagesUploaded = 0
                 binding.calProgressBar.max = calExpectedImages
                 if (binding.calProgressBar.visibility != View.VISIBLE) {
@@ -431,7 +457,29 @@ class ControlFragment : Fragment() {
                 if (binding.calProgressText.visibility != View.VISIBLE) {
                     binding.calProgressText.visibility = View.VISIBLE
                 }
-                binding.calProgressText.text = "Calibrating: 0/${binding.calProgressBar.max}"
+                binding.calProgressText.text = "Calibration: 0/${binding.calProgressBar.max}"
+            }
+        }
+
+        PiSocketManager.on("cal_stage") { payload ->
+            val j = payload as? JSONObject ?: return@on
+            val stage = j.optString("stage", "")
+            val ch = j.optInt("channel_index", -1)
+            val total = j.optInt("total_channels", 16).coerceAtLeast(1)
+            val wl = j.optInt("wavelength_nm", -1)
+            if (!isAdded) return@on
+            requireActivity().runOnUiThread {
+                calTotalChannels = total
+                binding.calProgressBar.max = total
+                val channelText = if (ch >= 0) "${ch + 1}/$total" else ""
+                val wlText = if (wl > 0) " ${wl}nm" else ""
+                calStageLine = when (stage.lowercase(Locale.US)) {
+                    "capturing_dark" -> "Capturing dark$wlText${if (channelText.isNotBlank()) " ($channelText)" else ""}"
+                    "calibrating" -> ""
+                    "uploading" -> "Uploading calibration files"
+                    else -> stage.replace('_', ' ')
+                }
+                updateCalProgressText()
             }
         }
 
@@ -455,6 +503,10 @@ class ControlFragment : Fragment() {
                 refreshCalExpectedImages()
                 binding.calProgressBar.visibility = View.VISIBLE
                 binding.calProgressText.visibility = View.VISIBLE
+                val channelIndex = j.optInt("channel_index", 0)
+                val totalChannels = j.optInt("total_channels", calTotalChannels).coerceAtLeast(1)
+                binding.calProgressBar.max = totalChannels
+                binding.calProgressBar.progress = (channelIndex + 1).coerceIn(0, totalChannels)
 
                 val wl  = vm.calWavelengthNm.value
                 val ave = vm.calAverageIntensity.value
@@ -462,8 +514,8 @@ class ControlFragment : Fragment() {
                 val n   = vm.calNormNew.value
 
                 calInfoLine =
-                    "${wl ?: "-"}nm · avg=${ave?.let { String.format(Locale.US, "%.1f", it) } ?: "-"} · " +
-                            "norm ${p?.let { String.format(Locale.US, "%.2f", it) } ?: "-"}→" +
+                    "${wl ?: "-"}nm - avg=${ave?.let { String.format(Locale.US, "%.1f", it) } ?: "-"} - " +
+                            "norm ${p?.let { String.format(Locale.US, "%.2f", it) } ?: "-"}->" +
                             "${n?.let { String.format(Locale.US, "%.2f", it) } ?: "-"}"
                 updateCalProgressText()
             }
@@ -477,11 +529,9 @@ class ControlFragment : Fragment() {
             if (isDark) calDarkFrameSeen = true
             if (!isAdded) return@on
             requireActivity().runOnUiThread {
-                // Count every uploaded calibration image (dark + final LED)
                 calDarkImagesUploaded += 1
                 refreshCalExpectedImages()
-                binding.calProgressBar.progress =
-                    (binding.calProgressBar.progress + 1).coerceAtMost(binding.calProgressBar.max)
+                calStageLine = "Uploading calibration files"
                 updateCalProgressText()
             }
         }
@@ -496,13 +546,8 @@ class ControlFragment : Fragment() {
             }
             if (!isAdded) return@on
             requireActivity().runOnUiThread {
-                val images = j?.optInt("images", 16) ?: 16
-                val totalChannels = vm.calTotalChannels.value ?: calTotalChannels
-                if (images > totalChannels) {
-                    calDarkFrameSeen = true
-                    calExtraImagesExpected = (images - totalChannels).coerceAtLeast(0)
-                    refreshCalExpectedImages()
-                }
+                refreshCalExpectedImages()
+                binding.calProgressBar.progress = binding.calProgressBar.max
                 binding.calProgressBar.progress =
                     binding.calProgressBar.progress.coerceAtMost(binding.calProgressBar.max)
                 calCooldownUntil = now() + 1_500L
@@ -513,12 +558,16 @@ class ControlFragment : Fragment() {
         }
 
 // cal_error
-        PiSocketManager.on("cal_error") { _ ->
+        PiSocketManager.on("cal_error") { payload ->
+            val message = (payload as? JSONObject)
+                ?.optString("message")
+                ?.takeIf { it.isNotBlank() }
+                ?: "Calibration aborted"
             if (!isAdded) return@on
             requireActivity().runOnUiThread {
                 vm.failCalibration()
                 calCooldownUntil = now() + 1_500L
-                endCalibrationUi("Calibration aborted")
+                endCalibrationUi(message)
                 PiSocketManager.emit("get_state", JSONObject())
             }
         }
@@ -867,9 +916,13 @@ class ControlFragment : Fragment() {
 
 
     private fun resetUiToFreshState() {
+        isPiConnected = false
+        isConnecting = false
+
         // Connection strip
         binding.piConnectionStatus.text = "Status: Unknown"
         binding.piConnectionDot.setBackgroundResource(R.drawable.circle_grey)
+        renderTopConnectionChip(null)
 
         // ---- Clear battery chip ----
         binding.chipBattery.text = "— %"
@@ -1072,6 +1125,7 @@ class ControlFragment : Fragment() {
             setBaseUrls(ip)
             saveIp(ip)
             isConnecting = true
+            updateConnUi(null)
             connectSocket()
             checkStatus(ip)
         }
@@ -1150,9 +1204,11 @@ class ControlFragment : Fragment() {
                     return@launch
                 }
 
+                val useAmsiGrid = ensureAmsiSocketPreviewEnabledForCapture()
+
                 // 3) Start AMSI UI
                 vm.isCapturing.value = true
-                if (amsiSocketPreviewEnabled) {
+                if (useAmsiGrid) {
                     startImageGrid()
                 } else {
                     clearPreview()
@@ -1370,6 +1426,29 @@ class ControlFragment : Fragment() {
     }
 
 // ADD — robust preview control + waiting for Pi ack
+
+    private suspend fun ensureAmsiSocketPreviewEnabledForCapture(): Boolean {
+        if (!amsiSocketPreviewEnabled && !binding.switchAmsiSocketPreview.isChecked) {
+            return false
+        }
+
+        return try {
+            val resp = PiApi.api.setAmsiPreview(true)
+            val confirmed = resp.body()?.enabled == true
+            amsiSocketPreviewEnabled = confirmed
+            if (isAdded) {
+                binding.switchAmsiSocketPreview.setOnCheckedChangeListener(null)
+                binding.switchAmsiSocketPreview.isChecked = confirmed
+                attachAmsiSocketPreviewToggleListener()
+            }
+            confirmed
+        } catch (e: Exception) {
+            if (isAdded) {
+                toast("4x4 AMSI preview could not be enabled: ${e.localizedMessage}")
+            }
+            false
+        }
+    }
 
     // Ask the Pi to set preview ON/OFF and wait for ack via 'sw4' in state updates.
 // Returns true if the Pi reported the requested state before timeout.
@@ -1838,6 +1917,23 @@ class ControlFragment : Fragment() {
     }
 
 
+    private fun renderTopConnectionChip(connected: Boolean?) {
+        val icon = when (connected) {
+            true -> R.drawable.circle_green
+            false -> R.drawable.circle_red
+            else -> R.drawable.circle_grey
+        }
+
+        binding.topConnectionChip.setChipIconResource(icon)
+        binding.topConnectionChip.text = when {
+            connected == true -> "Connected"
+            isConnecting -> "Connecting"
+            connected == false -> "Disconnected"
+            else -> "Unknown"
+        }
+    }
+
+
     private fun updateConnUi(connected: Boolean?) {
         val drawable = when (connected) {
             true -> R.drawable.circle_green
@@ -1846,6 +1942,7 @@ class ControlFragment : Fragment() {
         }
         binding.piConnectionDot.background =
             ContextCompat.getDrawable(requireContext(), drawable)
+        renderTopConnectionChip(connected)
         binding.piConnectionStatus.text = when (connected) {
             true -> "Status: Connected"
             false -> {
@@ -1856,7 +1953,7 @@ class ControlFragment : Fragment() {
                     "Status: Not Connected"
                 }
             }
-            else -> "Status: Unknown"
+            else -> if (isConnecting) "Status: Connecting" else "Status: Unknown"
         }
         if (connected == true) {
             isPiConnected = true
@@ -1970,6 +2067,12 @@ class ControlFragment : Fragment() {
         if (!isAdded) return
 
         requireActivity().runOnUiThread {
+            val indexedAmsiFrame = amsiPreviewIndex(data) in 0..15
+            if (indexedAmsiFrame && (amsiSocketPreviewEnabled || isCaptureOngoing || vm.isCapturing.value == true)) {
+                addAmsiGridBitmap(data, bmp)
+                return@runOnUiThread
+            }
+
             when (mode) {
                 PreviewMode.LIVE_FEED, PreviewMode.STARTING -> {
                     if (mode != PreviewMode.LIVE_FEED) {
@@ -1979,20 +2082,7 @@ class ControlFragment : Fragment() {
                 }
 
                 PreviewMode.AMSI_GRID -> {
-                    var idx = data.optInt("index", -1)
-                    if (idx !in 0..15) idx = data.optInt("idx", -1)
-                    if (idx !in 0..15) idx = data.optInt("i", -1)
-                    if (idx !in 0..15) idx = data.optInt("channel", -1)
-                    if (idx !in 0..15) idx = data.optInt("led", -1)
-
-                    if (idx !in 0..15) {
-                        val current = vm.capturedBitmaps.value ?: List(16) { null }
-                        idx = current.indexOfFirst { it == null }.takeIf { it >= 0 } ?: -1
-                    }
-
-                    if (idx in 0..15) {
-                        vm.addBitmap(idx, bmp)
-                    }
+                    addAmsiGridBitmap(data, bmp)
                 }
 
                 PreviewMode.OFF -> Unit
@@ -2040,7 +2130,11 @@ class ControlFragment : Fragment() {
                 // Pi started AMSI; remember whether preview was on so we can restore after
                 wasPreviewOnBeforeAmsi = lastSw4FromServer || binding.switchCameraPreview.isChecked || previewActive
                 ensurePreviewOffAsync(1500)
-                if (amsiSocketPreviewEnabled) {
+                val wantsAmsiGrid = amsiSocketPreviewEnabled || binding.switchAmsiSocketPreview.isChecked
+                if (wantsAmsiGrid) {
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        ensureAmsiSocketPreviewEnabledForCapture()
+                    }
                     startImageGrid()
                 } else {
                     clearPreview()
@@ -2369,6 +2463,7 @@ class ControlFragment : Fragment() {
         calExtraImagesExpected = 0
         calDarkImagesUploaded = 0
         calInfoLine = ""
+        calStageLine = ""
         calTotalChannels = vm.calTotalChannels.value ?: 16
         calExpectedImages = 16
         refreshCalExpectedImages()
@@ -2376,11 +2471,7 @@ class ControlFragment : Fragment() {
 
     private fun refreshCalExpectedImages() {
         val totalChannels = vm.calTotalChannels.value ?: calTotalChannels
-        calExpectedImages = if (calDarkFrameSeen) {
-            totalChannels + calExtraImagesExpected
-        } else {
-            totalChannels
-        }
+        calExpectedImages = totalChannels.coerceAtLeast(1)
         binding.calProgressBar.max = calExpectedImages
         if (binding.calProgressBar.progress > calExpectedImages) {
             binding.calProgressBar.progress = calExpectedImages
@@ -2390,8 +2481,10 @@ class ControlFragment : Fragment() {
     private fun updateCalProgressText() {
         val done = binding.calProgressBar.progress
         val total = binding.calProgressBar.max
-        val info = if (calInfoLine.isNotBlank()) " · $calInfoLine" else ""
-        binding.calProgressText.text = "Calibrating: $done/$total$info"
+        val stage = if (calStageLine.isNotBlank()) " - $calStageLine" else ""
+        val showInfo = calStageLine.isBlank()
+        val info = if (showInfo && calInfoLine.isNotBlank()) " - $calInfoLine" else ""
+        binding.calProgressText.text = "Calibration: $done/$total$stage$info"
     }
     // SUSPEND: turn preview off on the Pi and locally, wait briefly for ack.
     private suspend fun ensurePreviewOff(timeoutMs: Long = 2_000L) {

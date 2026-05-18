@@ -6,7 +6,9 @@ import com.example.msiandroidapp.data.AppDatabase
 import com.example.msiandroidapp.data.Session
 import com.example.msiandroidapp.util.PngHeaderReader
 import com.example.msiandroidapp.util.UploadProgressBus
+import com.google.android.gms.location.Priority
 import com.google.android.gms.location.LocationServices
+import com.google.android.gms.tasks.CancellationTokenSource
 import fi.iki.elonen.NanoHTTPD
 import fi.iki.elonen.NanoHTTPD.IHTTPSession
 import fi.iki.elonen.NanoHTTPD.Response
@@ -20,6 +22,7 @@ import java.util.Date
 import java.util.UUID
 import java.util.Collections.synchronizedList
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
 
@@ -82,7 +85,7 @@ class UploadServer(
 
     private val IMAGES_PER_AMSI = 16
     private val SESSION_TIMEOUT_MS = 10 * 60 * 1000L     // clear trackers after 10 min idle
-    private val LOCATION_TIMEOUT_MS = 2_000L             // location best-effort
+    private val LOCATION_TIMEOUT_MS = 5_000L             // location best-effort
     private val ZIP_SIGNATURES = arrayOf(
         byteArrayOf(0x50, 0x4B, 0x03, 0x04),
         byteArrayOf(0x50, 0x4B, 0x05, 0x06),
@@ -455,7 +458,7 @@ class UploadServer(
             val runId = (hintedRunId ?: sessionIdFromJson)
                 ?: return badRequest("metadata.json missing sessionId/runId")
 
-            // Persist calibration metadata JSON alongside calibration images
+            // Persist metadata JSON alongside image files for detail/gallery overlays.
             if (modeFromJson == "cal") {
                 try {
                     val calRoot = File(sessionsRoot, "CAL").apply { mkdirs() }
@@ -465,6 +468,15 @@ class UploadServer(
                     Log.i(TAG, "Calibration metadata saved: ${target.absolutePath}")
                 } catch (e: Exception) {
                     Log.w(TAG, "Failed to save calibration metadata for runId=$runId", e)
+                }
+            } else if (modeFromJson == "amsi") {
+                try {
+                    val amsiDir = File(sessionsRoot, runId).apply { mkdirs() }
+                    val target = File(amsiDir, "${runId}_metadata.json")
+                    target.writeText(txt)
+                    Log.i(TAG, "AMSI metadata saved: ${target.absolutePath}")
+                } catch (e: Exception) {
+                    Log.w(TAG, "Failed to save AMSI metadata for runId=$runId", e)
                 }
             }
 
@@ -883,72 +895,11 @@ class UploadServer(
             return
         }
 
-        val fused = LocationServices.getFusedLocationProviderClient(context)
-
-        // if we can't resolve location fast, we still insert after timeout
-        val fallbackJob = scope.launch {
-            delay(LOCATION_TIMEOUT_MS)
-            Log.w(TAG, "Location timeout; inserting '$key' with Lat NA, Lon NA.")
+        getBestEffortLocationString("session '$key'") { locString ->
             saveSessionToDb(
                 completedAtMillis = completedAtMillis,
                 timestampStr = tsStr,
-                locationStr = "Lat NA, Lon NA",
-                imagePaths = imagePaths,
-                type = type,
-                label = label,
-                runId = runId,
-                iniName = iniName,
-                sectionIndex = sectionIndex
-            )
-        }
-
-        try {
-            fused.lastLocation
-                .addOnSuccessListener { loc ->
-                    fallbackJob.cancel()
-
-                    val locString = formatLatLon(loc)
-
-                    saveSessionToDb(
-                        completedAtMillis = completedAtMillis,
-                        timestampStr = tsStr,
-                        locationStr = locString,
-                        imagePaths = imagePaths,
-                        type = type,
-                        label = label,
-                        runId = runId,
-                        iniName = iniName,
-                        sectionIndex = sectionIndex
-                    )
-                }
-                .addOnFailureListener { err ->
-                    fallbackJob.cancel()
-                    Log.w(
-                        TAG,
-                        "lastLocation failed: ${err.message}. Inserting Lat NA, Lon NA for '$key'"
-                    )
-                    saveSessionToDb(
-                        completedAtMillis = completedAtMillis,
-                        timestampStr = tsStr,
-                        locationStr = "Lat NA, Lon NA",
-                        imagePaths = imagePaths,
-                        type = type,
-                        label = label,
-                        runId = runId,
-                        iniName = iniName,
-                        sectionIndex = sectionIndex
-                    )
-                }
-        } catch (e: Exception) {
-            fallbackJob.cancel()
-            Log.w(
-                TAG,
-                "Location flow error: ${e.message}. Inserting Lat NA, Lon NA for '$key'"
-            )
-            saveSessionToDb(
-                completedAtMillis = completedAtMillis,
-                timestampStr = tsStr,
-                locationStr = "Lat NA, Lon NA",
+                locationStr = locString,
                 imagePaths = imagePaths,
                 type = type,
                 label = label,
@@ -960,41 +911,68 @@ class UploadServer(
     }
 
     private fun getBestEffortLocationString(
+        purpose: String = "session",
         onResult: (String) -> Unit
     ) {
         val fused = LocationServices.getFusedLocationProviderClient(context)
+        val delivered = AtomicBoolean(false)
+        val cancellation = CancellationTokenSource()
 
-        scope.launch {
-            // timeout job
-            val timeout = launch {
-                delay(LOCATION_TIMEOUT_MS)
-                onResult("Lat NA, Lon NA")
+        fun deliver(location: String) {
+            if (delivered.compareAndSet(false, true)) {
+                cancellation.cancel()
+                onResult(location)
             }
+        }
 
+        fun tryCachedLocation(reason: String) {
             try {
                 fused.lastLocation
                     .addOnSuccessListener { loc ->
-                        if (!timeout.isActive) return@addOnSuccessListener
-                        timeout.cancel()
-
                         if (loc == null) {
-                            onResult("Lat NA, Lon NA")
+                            Log.w(TAG, "$reason; no cached location for $purpose.")
+                            deliver("Lat NA, Lon NA")
                         } else {
-                            onResult(formatLatLon(loc))
+                            deliver(formatLatLon(loc))
                         }
                     }
                     .addOnFailureListener { err ->
-                        if (!timeout.isActive) return@addOnFailureListener
-                        timeout.cancel()
-                        Log.w(TAG, "lastLocation failed in PMFI row: ${err.message}")
-                        onResult("Lat NA, Lon NA")
+                        Log.w(TAG, "$reason; lastLocation failed for $purpose: ${err.message}")
+                        deliver("Lat NA, Lon NA")
                     }
             } catch (e: Exception) {
-                if (timeout.isActive) {
-                    timeout.cancel()
-                    Log.w(TAG, "Location flow threw in PMFI row: ${e.message}")
+                Log.w(TAG, "$reason; location fallback threw for $purpose: ${e.message}")
+                deliver("Lat NA, Lon NA")
+            }
+        }
+
+        scope.launch {
+            launch {
+                delay(LOCATION_TIMEOUT_MS)
+                if (delivered.compareAndSet(false, true)) {
+                    cancellation.cancel()
+                    Log.w(TAG, "Location timeout for $purpose; inserting Lat NA, Lon NA.")
                     onResult("Lat NA, Lon NA")
                 }
+            }
+
+            try {
+                fused.getCurrentLocation(
+                    Priority.PRIORITY_HIGH_ACCURACY,
+                    cancellation.token
+                )
+                    .addOnSuccessListener { loc ->
+                        if (loc == null) {
+                            tryCachedLocation("currentLocation returned null")
+                        } else {
+                            deliver(formatLatLon(loc))
+                        }
+                    }
+                    .addOnFailureListener { err ->
+                        tryCachedLocation("currentLocation failed for $purpose: ${err.message}")
+                    }
+            } catch (e: Exception) {
+                tryCachedLocation("currentLocation threw for $purpose: ${e.message}")
             }
         }
     }

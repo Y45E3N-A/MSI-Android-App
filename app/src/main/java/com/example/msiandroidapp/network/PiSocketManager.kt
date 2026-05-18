@@ -10,6 +10,7 @@ import io.socket.client.Manager
 import io.socket.client.Socket
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
@@ -41,6 +42,7 @@ object PiSocketManager {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val previewDecodeExecutor = Executors.newSingleThreadExecutor()
     private val latestPreviewPayload = AtomicReference<Any?>(null)
+    private val indexedPreviewPayloads = ConcurrentLinkedQueue<Any>()
     private val previewDecodeScheduled = AtomicBoolean(false)
 
     // Emit buffer for events fired before connection is up
@@ -202,6 +204,7 @@ object PiSocketManager {
             socket = null
             connecting.set(false)
             latestPreviewPayload.set(null)
+            indexedPreviewPayloads.clear()
             previewDecodeScheduled.set(false)
             notifyConnected(false)
         }
@@ -315,7 +318,11 @@ object PiSocketManager {
 
     private fun enqueuePreviewDecode(payload: Any?) {
         if (payload == null) return
-        latestPreviewPayload.set(payload)
+        if (isIndexedPreviewPayload(payload)) {
+            indexedPreviewPayloads.offer(payload)
+        } else {
+            latestPreviewPayload.set(payload)
+        }
         schedulePreviewDecodeLoop()
     }
 
@@ -327,7 +334,9 @@ object PiSocketManager {
     private fun drainPreviewFrames() {
         try {
             while (true) {
-                val next = latestPreviewPayload.getAndSet(null) ?: break
+                val next = indexedPreviewPayloads.poll()
+                    ?: latestPreviewPayload.getAndSet(null)
+                    ?: break
                 val (json, bmp) = extractBitmapFromPayload(next) ?: continue
                 postToMain { previewImageCallback?.invoke(json, bmp) }
             }
@@ -335,7 +344,7 @@ object PiSocketManager {
             Log.e(TAG, "preview decode loop error", e)
         } finally {
             previewDecodeScheduled.set(false)
-            if (latestPreviewPayload.get() != null) {
+            if (indexedPreviewPayloads.isNotEmpty() || latestPreviewPayload.get() != null) {
                 schedulePreviewDecodeLoop()
             }
         }
@@ -373,6 +382,18 @@ object PiSocketManager {
         is JSONObject -> arg
         is String -> runCatching { JSONObject(arg) }.getOrElse { arg }
         else -> arg
+    }
+
+    private fun isIndexedPreviewPayload(payload: Any?): Boolean {
+        val json = when (payload) {
+            is JSONObject -> payload
+            is String -> runCatching { JSONObject(payload) }.getOrNull()
+            else -> null
+        } ?: return false
+
+        return listOf("index", "idx", "i", "channel", "led").any { key ->
+            json.has(key) && json.optInt(key, -1) in 0..15
+        }
     }
 
     private fun postToMain(block: () -> Unit) {

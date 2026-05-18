@@ -41,6 +41,22 @@
                 android:orientation="horizontal">
 
                 <com.google.android.material.chip.Chip
+                    android:id="@+id/topConnectionChip"
+                    style="@style/Widget.MaterialComponents.Chip.Choice"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:layout_marginEnd="8dp"
+                    android:text="Unknown"
+                    android:textSize="14sp"
+                    android:maxLines="1"
+                    android:ellipsize="end"
+                    app:chipIcon="@drawable/circle_grey"
+                    app:chipIconVisible="true"
+                    app:checkedIconVisible="false"
+                    app:chipIconSize="14dp"
+                    app:chipCornerRadius="20dp" />
+
+                <com.google.android.material.chip.Chip
                     android:id="@+id/chipBattery"
                     style="@style/Widget.MaterialComponents.Chip.Choice"
                     android:layout_width="wrap_content"
@@ -294,208 +310,6 @@
                         android:textSize="15sp"
                         android:maxLines="1"
                         android:ellipsize="end" />
-                </LinearLayout>
-            </com.google.android.material.card.MaterialCardView>
-
-            <com.google.android.material.card.MaterialCardView
-                android:id="@+id/previewCard"
-                android:layout_width="match_parent"
-                android:layout_height="wrap_content"
-                android:layout_marginBottom="14dp"
-                app:cardCornerRadius="18dp"
-                app:cardElevation="2dp"
-                app:contentPadding="0dp">
-
-                <LinearLayout
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:orientation="vertical">
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="horizontal"
-                        android:gravity="center_vertical"
-                        android:paddingStart="16dp"
-                        android:paddingEnd="16dp"
-                        android:paddingTop="14dp"
-                        android:paddingBottom="10dp">
-
-                        <LinearLayout
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:orientation="vertical">
-
-                            <TextView
-                                android:id="@+id/previewTitleText"
-                                android:layout_width="match_parent"
-                                android:layout_height="wrap_content"
-                                android:text="Camera Preview"
-                                android:textSize="18sp"
-                                android:textStyle="bold"
-                                android:maxLines="1"
-                                android:ellipsize="end" />
-
-                            <TextView
-                                android:id="@+id/previewSubtitleText"
-                                android:layout_width="match_parent"
-                                android:layout_height="wrap_content"
-                                android:text="Use preview to align the leaf before capture."
-                                android:textSize="13sp"
-                                android:alpha="0.75"
-                                android:maxLines="2"
-                                android:ellipsize="end" />
-                        </LinearLayout>
-
-                        <com.google.android.material.chip.Chip
-                            android:id="@+id/previewStatusChip"
-                            style="@style/Widget.MaterialComponents.Chip.Choice"
-                            android:layout_width="wrap_content"
-                            android:layout_height="36dp"
-                            android:text="Off"
-                            android:textSize="12sp"
-                            android:maxLines="1"
-                            android:ellipsize="end"
-                            app:chipCornerRadius="18dp" />
-                    </LinearLayout>
-
-                    <FrameLayout
-                        android:id="@+id/previewFrame"
-                        android:layout_width="match_parent"
-                        android:layout_height="240dp"
-                        android:layout_marginStart="16dp"
-                        android:layout_marginEnd="16dp"
-                        android:layout_marginBottom="14dp"
-                        android:background="@android:color/black">
-
-                        <FrameLayout
-                            android:id="@+id/preview_container"
-                            android:layout_width="match_parent"
-                            android:layout_height="match_parent"
-                            android:background="@android:color/black" />
-
-                        <LinearLayout
-                            android:id="@+id/previewEmptyState"
-                            android:layout_width="match_parent"
-                            android:layout_height="match_parent"
-                            android:orientation="vertical"
-                            android:gravity="center"
-                            android:padding="20dp"
-                            android:background="@android:color/black">
-
-                            <TextView
-                                android:layout_width="match_parent"
-                                android:layout_height="wrap_content"
-                                android:text="Preview is off"
-                                android:textColor="@android:color/white"
-                                android:textSize="18sp"
-                                android:textStyle="bold"
-                                android:gravity="center"
-                                android:maxLines="1"
-                                android:ellipsize="end" />
-
-                            <TextView
-                                android:layout_width="match_parent"
-                                android:layout_height="wrap_content"
-                                android:layout_marginTop="6dp"
-                                android:text="Turn on Camera Preview to check alignment."
-                                android:textColor="@android:color/white"
-                                android:textSize="13sp"
-                                android:alpha="0.75"
-                                android:gravity="center"
-                                android:maxLines="2"
-                                android:ellipsize="end" />
-                        </LinearLayout>
-
-                        <LinearLayout
-                            android:id="@+id/previewLoadingState"
-                            android:layout_width="match_parent"
-                            android:layout_height="match_parent"
-                            android:orientation="vertical"
-                            android:gravity="center"
-                            android:padding="20dp"
-                            android:background="@android:color/black"
-                            android:visibility="gone">
-
-                            <ProgressBar
-                                android:layout_width="42dp"
-                                android:layout_height="42dp"
-                                android:indeterminate="true" />
-
-                            <TextView
-                                android:layout_width="match_parent"
-                                android:layout_height="wrap_content"
-                                android:layout_marginTop="12dp"
-                                android:text="Starting preview..."
-                                android:textColor="@android:color/white"
-                                android:textSize="14sp"
-                                android:gravity="center"
-                                android:maxLines="1"
-                                android:ellipsize="end" />
-                        </LinearLayout>
-
-                        <LinearLayout
-                            android:id="@+id/previewOverlay"
-                            android:layout_width="match_parent"
-                            android:layout_height="wrap_content"
-                            android:layout_gravity="top"
-                            android:orientation="horizontal"
-                            android:gravity="center_vertical"
-                            android:padding="10dp"
-                            android:background="#66000000"
-                            android:visibility="gone">
-
-                            <TextView
-                                android:id="@+id/previewOverlayText"
-                                android:layout_width="0dp"
-                                android:layout_height="wrap_content"
-                                android:layout_weight="1"
-                                android:text="Live"
-                                android:textColor="@android:color/white"
-                                android:textSize="13sp"
-                                android:maxLines="1"
-                                android:ellipsize="end" />
-
-                            <TextView
-                                android:id="@+id/previewFpsText"
-                                android:layout_width="wrap_content"
-                                android:layout_height="wrap_content"
-                                android:text="2 FPS"
-                                android:textColor="@android:color/white"
-                                android:textSize="12sp"
-                                android:maxLines="1"
-                                android:ellipsize="end" />
-                        </LinearLayout>
-                    </FrameLayout>
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="horizontal"
-                        android:gravity="center_vertical"
-                        android:paddingStart="16dp"
-                        android:paddingEnd="16dp"
-                        android:paddingBottom="16dp">
-
-                        <TextView
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="Live camera preview"
-                            android:textSize="15sp"
-                            android:maxLines="1"
-                            android:ellipsize="end" />
-
-                        <Switch
-                            android:id="@+id/switch_camera_preview"
-                            android:layout_width="wrap_content"
-                            android:layout_height="wrap_content"
-                            android:text=""
-                            android:textOn=""
-                            android:textOff="" />
-                    </LinearLayout>
-
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
@@ -1105,6 +919,208 @@
                         </FrameLayout>
 
                     </GridLayout>
+                </LinearLayout>
+            </com.google.android.material.card.MaterialCardView>
+
+            <com.google.android.material.card.MaterialCardView
+                android:id="@+id/previewCard"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginBottom="14dp"
+                app:cardCornerRadius="18dp"
+                app:cardElevation="2dp"
+                app:contentPadding="0dp">
+
+                <LinearLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:orientation="vertical">
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:paddingStart="16dp"
+                        android:paddingEnd="16dp"
+                        android:paddingTop="14dp"
+                        android:paddingBottom="10dp">
+
+                        <LinearLayout
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:orientation="vertical">
+
+                            <TextView
+                                android:id="@+id/previewTitleText"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:text="Camera Preview"
+                                android:textSize="18sp"
+                                android:textStyle="bold"
+                                android:maxLines="1"
+                                android:ellipsize="end" />
+
+                            <TextView
+                                android:id="@+id/previewSubtitleText"
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:text="Use preview to align the leaf before capture."
+                                android:textSize="13sp"
+                                android:alpha="0.75"
+                                android:maxLines="2"
+                                android:ellipsize="end" />
+                        </LinearLayout>
+
+                        <com.google.android.material.chip.Chip
+                            android:id="@+id/previewStatusChip"
+                            style="@style/Widget.MaterialComponents.Chip.Choice"
+                            android:layout_width="wrap_content"
+                            android:layout_height="36dp"
+                            android:text="Off"
+                            android:textSize="12sp"
+                            android:maxLines="1"
+                            android:ellipsize="end"
+                            app:chipCornerRadius="18dp" />
+                    </LinearLayout>
+
+                    <FrameLayout
+                        android:id="@+id/previewFrame"
+                        android:layout_width="match_parent"
+                        android:layout_height="240dp"
+                        android:layout_marginStart="16dp"
+                        android:layout_marginEnd="16dp"
+                        android:layout_marginBottom="14dp"
+                        android:background="@android:color/black">
+
+                        <FrameLayout
+                            android:id="@+id/preview_container"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:background="@android:color/black" />
+
+                        <LinearLayout
+                            android:id="@+id/previewEmptyState"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:orientation="vertical"
+                            android:gravity="center"
+                            android:padding="20dp"
+                            android:background="@android:color/black">
+
+                            <TextView
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:text="Preview is off"
+                                android:textColor="@android:color/white"
+                                android:textSize="18sp"
+                                android:textStyle="bold"
+                                android:gravity="center"
+                                android:maxLines="1"
+                                android:ellipsize="end" />
+
+                            <TextView
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="6dp"
+                                android:text="Turn on Camera Preview to check alignment."
+                                android:textColor="@android:color/white"
+                                android:textSize="13sp"
+                                android:alpha="0.75"
+                                android:gravity="center"
+                                android:maxLines="2"
+                                android:ellipsize="end" />
+                        </LinearLayout>
+
+                        <LinearLayout
+                            android:id="@+id/previewLoadingState"
+                            android:layout_width="match_parent"
+                            android:layout_height="match_parent"
+                            android:orientation="vertical"
+                            android:gravity="center"
+                            android:padding="20dp"
+                            android:background="@android:color/black"
+                            android:visibility="gone">
+
+                            <ProgressBar
+                                android:layout_width="42dp"
+                                android:layout_height="42dp"
+                                android:indeterminate="true" />
+
+                            <TextView
+                                android:layout_width="match_parent"
+                                android:layout_height="wrap_content"
+                                android:layout_marginTop="12dp"
+                                android:text="Starting preview..."
+                                android:textColor="@android:color/white"
+                                android:textSize="14sp"
+                                android:gravity="center"
+                                android:maxLines="1"
+                                android:ellipsize="end" />
+                        </LinearLayout>
+
+                        <LinearLayout
+                            android:id="@+id/previewOverlay"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_gravity="top"
+                            android:orientation="horizontal"
+                            android:gravity="center_vertical"
+                            android:padding="10dp"
+                            android:background="#66000000"
+                            android:visibility="gone">
+
+                            <TextView
+                                android:id="@+id/previewOverlayText"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:text="Live"
+                                android:textColor="@android:color/white"
+                                android:textSize="13sp"
+                                android:maxLines="1"
+                                android:ellipsize="end" />
+
+                            <TextView
+                                android:id="@+id/previewFpsText"
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:text="2 FPS"
+                                android:textColor="@android:color/white"
+                                android:textSize="12sp"
+                                android:maxLines="1"
+                                android:ellipsize="end" />
+                        </LinearLayout>
+                    </FrameLayout>
+
+                    <LinearLayout
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="horizontal"
+                        android:gravity="center_vertical"
+                        android:paddingStart="16dp"
+                        android:paddingEnd="16dp"
+                        android:paddingBottom="16dp">
+
+                        <TextView
+                            android:layout_width="0dp"
+                            android:layout_height="wrap_content"
+                            android:layout_weight="1"
+                            android:text="Live camera preview"
+                            android:textSize="15sp"
+                            android:maxLines="1"
+                            android:ellipsize="end" />
+
+                        <Switch
+                            android:id="@+id/switch_camera_preview"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:text=""
+                            android:textOn=""
+                            android:textOff="" />
+                    </LinearLayout>
+
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 

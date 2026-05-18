@@ -7,8 +7,11 @@ import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
 import androidx.fragment.app.Fragment
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
 import com.example.msiandroidapp.ui.gallery.ImagePagerAdapter
+import com.example.msiandroidapp.ui.gallery.ImageSelectorAdapter
 import com.example.msiandroidapp.util.PngHeaderReader
 import java.io.File
 import java.util.Locale
@@ -19,6 +22,11 @@ class ImageViewerFragment : Fragment() {
 
     private lateinit var viewPager: ViewPager2
     private lateinit var emptyView: TextView
+    private lateinit var selectorRecycler: RecyclerView
+    private var selectorAdapter: ImageSelectorAdapter? = null
+    private val amsiWavelengths = intArrayOf(
+        395, 415, 450, 470, 505, 528, 555, 570, 590, 610, 625, 640, 660, 730, 850, 880
+    )
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -28,6 +36,8 @@ class ImageViewerFragment : Fragment() {
         val view = inflater.inflate(R.layout.fragment_image_viewer, container, false)
         viewPager = view.findViewById(R.id.imageViewPager)
         emptyView = view.findViewById(R.id.empty_view)
+        selectorRecycler = view.findViewById(R.id.image_selector_recycler)
+        selectorRecycler.layoutManager = LinearLayoutManager(requireContext(), LinearLayoutManager.HORIZONTAL, false)
 
         // Retrieve file-path strings that were placed in the arguments bundle
         val imagePaths = arguments?.getStringArrayList("imagePaths") ?: arrayListOf()
@@ -42,14 +52,35 @@ class ImageViewerFragment : Fragment() {
             emptyView.text = "No images found for this session"
             emptyView.visibility = View.VISIBLE
             viewPager.visibility = View.GONE
+            selectorRecycler.visibility = View.GONE
         } else {
             emptyView.visibility = View.GONE
             viewPager.visibility = View.VISIBLE
-            viewPager.adapter = ImagePagerAdapter(buildImageItems(files, uris))
-            viewPager.offscreenPageLimit = 1
+            setupImagePager(buildImageItems(files, uris))
         }
 
         return view
+    }
+
+    private fun setupImagePager(items: List<ImagePagerAdapter.ImageItem>) {
+        selectorAdapter = ImageSelectorAdapter(items) { position ->
+            viewPager.setCurrentItem(position, true)
+        }
+        selectorRecycler.adapter = selectorAdapter
+        selectorRecycler.visibility = View.VISIBLE
+
+        viewPager.adapter = ImagePagerAdapter(items) { position, isZoomed ->
+            if (position == viewPager.currentItem) {
+                selectorRecycler.visibility = if (isZoomed) View.GONE else View.VISIBLE
+            }
+        }
+        viewPager.offscreenPageLimit = 1
+        viewPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
+            override fun onPageSelected(position: Int) {
+                selectorAdapter?.setSelected(position)
+                selectorRecycler.smoothScrollToPosition(position)
+            }
+        })
     }
 
     private data class CalMeta(
@@ -190,9 +221,31 @@ class ImageViewerFragment : Fragment() {
 
             ImagePagerAdapter.ImageItem(
                 uri = uri,
-                title = titleLines.joinToString("\n")
+                title = titleLines.joinToString("\n"),
+                selectorLabel = file?.let { buildSelectorLabel(it, idx) } ?: "Frame ${idx + 1}"
             )
         }
+    }
+
+    private fun buildSelectorLabel(file: File, frameIdx: Int): String {
+        val name = file.name
+        val idx = extractImageIndex(name)
+        val wavelength = idx?.let { amsiWavelengths.getOrNull(it) }
+        return when {
+            Regex("(?i)cal_dark_\\d+").containsMatchIn(name) ->
+                wavelength?.let { "Dark\n$it nm" } ?: "Dark\n${idx ?: frameIdx + 1}"
+            Regex("(?i)cal_image_\\d+").containsMatchIn(name) ->
+                wavelength?.let { "$it nm" } ?: "Cal\n${idx ?: frameIdx + 1}"
+            Regex("(?i)image_\\d+").containsMatchIn(name) ->
+                wavelength?.let { "$it nm" } ?: "Image\n${idx ?: frameIdx + 1}"
+            else -> "Frame\n${frameIdx + 1}"
+        }
+    }
+
+    private fun extractImageIndex(name: String): Int? {
+        val match = Regex("(?i)(?:cal_image_|cal_dark_|image_|cal_channel_|frame_)(\\d+)").find(name)
+            ?: return null
+        return match.groupValues.getOrNull(1)?.toIntOrNull()
     }
 
     private fun extractPmfiRunId(path: String): String? {

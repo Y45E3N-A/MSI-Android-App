@@ -11,6 +11,8 @@ import android.widget.TextView
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AppCompatActivity
+import androidx.recyclerview.widget.LinearLayoutManager
+import androidx.recyclerview.widget.RecyclerView
 import androidx.viewpager2.widget.ViewPager2
 import com.example.msiandroidapp.R
 import com.example.msiandroidapp.data.AppDatabase
@@ -23,6 +25,8 @@ class SessionDetailActivity : AppCompatActivity() {
 
     private lateinit var viewPager: ViewPager2
     private lateinit var emptyView: TextView
+    private lateinit var selectorRecycler: RecyclerView
+    private var selectorAdapter: ImageSelectorAdapter? = null
 
     private var sessionIdArg: Long = -1L
     private var imagePathsArg: ArrayList<String>? = null
@@ -30,6 +34,7 @@ class SessionDetailActivity : AppCompatActivity() {
         395, 415, 450, 470, 505, 528, 555, 570, 590, 610, 625, 640, 660, 730, 850, 880
     )
     private val calMetaCache = HashMap<String, CalMeta>()
+    private val amsiMetaCache = HashMap<String, AmsiMeta>()
     private data class PagerContext(
         val runId: String?,
         val sectionLabel: String?,
@@ -59,6 +64,8 @@ class SessionDetailActivity : AppCompatActivity() {
 
         viewPager = findViewById(R.id.viewPager)
         emptyView = findViewById(R.id.empty_view)
+        selectorRecycler = findViewById(R.id.image_selector_recycler)
+        selectorRecycler.layoutManager = LinearLayoutManager(this, LinearLayoutManager.HORIZONTAL, false)
 
         imagePathsArg = intent.getStringArrayListExtra(EXTRA_IMAGE_PATHS)
         sessionIdArg = intent.getLongExtra(EXTRA_SESSION_ID, -1L)
@@ -144,8 +151,7 @@ class SessionDetailActivity : AppCompatActivity() {
                     sectionLabel = s.label,
                     sectionIndex = s.sectionIndex
                 )
-                viewPager.adapter = ImagePagerAdapter(buildImageItems(uris, session = s, pagerContext = ctx))
-                viewPager.offscreenPageLimit = 1
+                setupImagePager(buildImageItems(uris, session = s, pagerContext = ctx))
             }
     }
 
@@ -163,12 +169,35 @@ class SessionDetailActivity : AppCompatActivity() {
 
         emptyView.visibility = View.GONE
         viewPager.visibility = View.VISIBLE
-        viewPager.adapter = ImagePagerAdapter(buildImageItems(uris, session = null, pagerContext = null))
+        setupImagePager(buildImageItems(uris, session = null, pagerContext = null))
+    }
+
+    private fun setupImagePager(items: List<ImagePagerAdapter.ImageItem>) {
+        selectorAdapter = ImageSelectorAdapter(items) { position ->
+            viewPager.setCurrentItem(position, true)
+        }
+        selectorRecycler.adapter = selectorAdapter
+        selectorRecycler.visibility = View.VISIBLE
+
+        viewPager.adapter = ImagePagerAdapter(items) { position, isZoomed ->
+            if (position == viewPager.currentItem) {
+                selectorRecycler.visibility = if (isZoomed) View.GONE else View.VISIBLE
+            }
+        }
         viewPager.offscreenPageLimit = 1
+        viewPager.registerOnPageChangeCallback(object : ViewPager2.OnPageChangeCallback() {
+            override fun onPageSelected(position: Int) {
+                selectorAdapter?.setSelected(position)
+                selectorRecycler.smoothScrollToPosition(position)
+            }
+        })
     }
 
     private fun showEmpty(message: String) {
         viewPager.visibility = View.GONE
+        if (::selectorRecycler.isInitialized) {
+            selectorRecycler.visibility = View.GONE
+        }
         emptyView.visibility = View.VISIBLE
         emptyView.text = message
     }
@@ -191,8 +220,24 @@ class SessionDetailActivity : AppCompatActivity() {
                         session = session,
                         pagerContext = pagerContext
                     )
-                } ?: "Image"
+                } ?: "Image",
+                selectorLabel = file?.let { buildSelectorLabel(it, frameIdx) } ?: "Frame ${frameIdx + 1}"
             )
+        }
+    }
+
+    private fun buildSelectorLabel(file: File, frameIdx: Int): String {
+        val name = file.name
+        val idx = extractImageIndex(name)
+        val wavelength = idx?.let { amsiWavelengths.getOrNull(it) }
+        return when {
+            Regex("(?i)cal_dark_\\d+").containsMatchIn(name) ->
+                wavelength?.let { "Dark\n$it nm" } ?: "Dark\n${idx ?: frameIdx + 1}"
+            Regex("(?i)cal_image_\\d+").containsMatchIn(name) ->
+                wavelength?.let { "$it nm" } ?: "Cal\n${idx ?: frameIdx + 1}"
+            Regex("(?i)image_\\d+").containsMatchIn(name) ->
+                wavelength?.let { "$it nm" } ?: "Image\n${idx ?: frameIdx + 1}"
+            else -> "Frame\n${frameIdx + 1}"
         }
     }
 
@@ -243,6 +288,14 @@ class SessionDetailActivity : AppCompatActivity() {
         val wl = idx?.let { amsiWavelengths.getOrNull(it) }
         if (wl != null) {
             parts.add("Wavelength: $wl nm")
+        }
+        if (session?.type.equals("AMSI", ignoreCase = true) && idx != null) {
+            val amsiRunId = runId ?: session?.runId
+            val amsiMeta = amsiRunId?.let { loadAmsiMetaIfNeeded(it, file.parentFile ?: file) }
+            val norm = amsiMeta?.normForIndex(idx)
+            if (norm != null) {
+                parts.add("Norm: ${String.format(Locale.US, "%.4f", norm)}")
+            }
         }
         if (idx != null) {
             parts.add("Index: $idx")
@@ -310,6 +363,40 @@ class SessionDetailActivity : AppCompatActivity() {
         val expUsByChannel: Map<Int, Int>,
         val gainByChannel: Map<Int, Int>
     )
+
+    private data class AmsiMeta(
+        val wavelengths: List<Int>,
+        val ledNorms: List<Double>
+    ) {
+        fun normForIndex(index: Int): Double? = ledNorms.getOrNull(index)
+    }
+
+    private fun loadAmsiMetaIfNeeded(runId: String, dir: File): AmsiMeta? {
+        amsiMetaCache[runId]?.let { return it }
+        val metaFile = dir.listFiles()
+            ?.firstOrNull { f ->
+                val name = f.name.lowercase(Locale.ROOT)
+                name.endsWith("_metadata.json") || (name.contains("metadata") && name.endsWith(".json"))
+            } ?: return null
+
+        return runCatching {
+            val root = org.json.JSONObject(metaFile.readText())
+            val mode = root.optString("mode")
+            if (!mode.equals("amsi", ignoreCase = true)) return@runCatching null
+
+            val wavelengthsArr = root.optJSONArray("wavelengths")
+            val wavelengths = wavelengthsArr?.let { arr ->
+                List(arr.length()) { i -> arr.optInt(i) }
+            } ?: amsiWavelengths.toList()
+
+            val normsArr = root.optJSONArray("led_norms") ?: return@runCatching null
+            val norms = List(normsArr.length()) { i -> normsArr.optDouble(i, Double.NaN) }
+                .filterNot { it.isNaN() }
+            if (norms.isEmpty()) return@runCatching null
+
+            AmsiMeta(wavelengths, norms).also { amsiMetaCache[runId] = it }
+        }.getOrNull()
+    }
 
     private fun loadCalMetaIfNeeded(runId: String, dir: File): CalMeta? {
         calMetaCache[runId]?.let { return it }
