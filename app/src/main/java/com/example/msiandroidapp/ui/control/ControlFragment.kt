@@ -450,6 +450,8 @@ class ControlFragment : Fragment() {
                 calExtraImagesExpected = darkExpected.coerceAtLeast(0)
                 calExpectedImages = channels.coerceAtLeast(1)
                 calDarkImagesUploaded = 0
+                calStageLine = ""
+                calInfoLine = ""
                 binding.calProgressBar.max = calExpectedImages
                 if (binding.calProgressBar.visibility != View.VISIBLE) {
                     binding.calProgressBar.visibility = View.VISIBLE
@@ -467,17 +469,26 @@ class ControlFragment : Fragment() {
             val ch = j.optInt("channel_index", -1)
             val total = j.optInt("total_channels", 16).coerceAtLeast(1)
             val wl = j.optInt("wavelength_nm", -1)
+            val stageNorm = if (j.has("led_norm")) j.optDouble("led_norm", Double.NaN) else Double.NaN
             if (!isAdded) return@on
             requireActivity().runOnUiThread {
                 calTotalChannels = total
                 binding.calProgressBar.max = total
+                val stageKey = stage.lowercase(Locale.US)
+                if (ch >= 0 && (stageKey == "capturing_dark" || stageKey == "calibrating")) {
+                    binding.calProgressBar.progress = (ch + 1).coerceIn(0, total)
+                }
                 val channelText = if (ch >= 0) "${ch + 1}/$total" else ""
                 val wlText = if (wl > 0) " ${wl}nm" else ""
-                calStageLine = when (stage.lowercase(Locale.US)) {
+                calStageLine = when (stageKey) {
                     "capturing_dark" -> "Capturing dark$wlText${if (channelText.isNotBlank()) " ($channelText)" else ""}"
                     "calibrating" -> ""
                     "uploading" -> "Uploading calibration files"
                     else -> stage.replace('_', ' ')
+                }
+                if (stage.equals("calibrating", true) && !stageNorm.isNaN()) {
+                    val ledLabel = if (wl > 0) "${wl}nm" else "LED ${ch + 1}"
+                    calInfoLine = "$ledLabel - norm ${String.format(Locale.US, "%.2f", stageNorm)}"
                 }
                 updateCalProgressText()
             }
@@ -485,13 +496,19 @@ class ControlFragment : Fragment() {
 
         PiSocketManager.on("cal_progress") { payload ->
             val j = payload as? JSONObject ?: return@on
+            val channelIndexPayload = j.optInt("channel_index", 0)
+            val totalChannelsPayload = j.optInt("total_channels", 16)
+            val wavelengthPayload = j.optInt("wavelength_nm", -1)
+            val averagePayload = j.optDouble("average_intensity", -1.0)
+            val normPrevPayload = j.optDouble("led_norm_prev", -1.0)
+            val normNewPayload = j.optDouble("led_norm_new", -1.0)
             vm.updateCalibrationProgress(
-                channelIndex      = j.optInt("channel_index", 0),
-                totalChannels     = j.optInt("total_channels", 16),
-                wavelengthNm      = j.optInt("wavelength_nm", -1),
-                averageIntensity  = j.optDouble("average_intensity", -1.0),
-                normPrev          = j.optDouble("led_norm_prev", -1.0),
-                normNew           = j.optDouble("led_norm_new", -1.0),
+                channelIndex      = channelIndexPayload,
+                totalChannels     = totalChannelsPayload,
+                wavelengthNm      = wavelengthPayload,
+                averageIntensity  = averagePayload,
+                normPrev          = normPrevPayload,
+                normNew           = normNewPayload,
             )
             if (!isAdded) return@on
             requireActivity().runOnUiThread {
@@ -503,20 +520,17 @@ class ControlFragment : Fragment() {
                 refreshCalExpectedImages()
                 binding.calProgressBar.visibility = View.VISIBLE
                 binding.calProgressText.visibility = View.VISIBLE
-                val channelIndex = j.optInt("channel_index", 0)
-                val totalChannels = j.optInt("total_channels", calTotalChannels).coerceAtLeast(1)
+                val channelIndex = channelIndexPayload
+                val totalChannels = totalChannelsPayload.coerceAtLeast(1)
                 binding.calProgressBar.max = totalChannels
                 binding.calProgressBar.progress = (channelIndex + 1).coerceIn(0, totalChannels)
-
-                val wl  = vm.calWavelengthNm.value
-                val ave = vm.calAverageIntensity.value
-                val p   = vm.calNormPrev.value
-                val n   = vm.calNormNew.value
+                calStageLine = ""
 
                 calInfoLine =
-                    "${wl ?: "-"}nm - avg=${ave?.let { String.format(Locale.US, "%.1f", it) } ?: "-"} - " +
-                            "norm ${p?.let { String.format(Locale.US, "%.2f", it) } ?: "-"}->" +
-                            "${n?.let { String.format(Locale.US, "%.2f", it) } ?: "-"}"
+                    "${if (wavelengthPayload > 0) wavelengthPayload.toString() else "-"}nm - " +
+                            "avg=${if (averagePayload >= 0.0) String.format(Locale.US, "%.1f", averagePayload) else "-"} - " +
+                            "norm ${if (normPrevPayload >= 0.0) String.format(Locale.US, "%.2f", normPrevPayload) else "-"}->" +
+                            if (normNewPayload >= 0.0) String.format(Locale.US, "%.2f", normNewPayload) else "-"
                 updateCalProgressText()
             }
         }
@@ -1239,6 +1253,8 @@ class ControlFragment : Fragment() {
 
             calStartGraceUntil = now() + 1200L
             resetCalExpectedImages()
+            calStageLine = ""
+            calInfoLine = ""
             vm.startCalibration(totalChannels = 16)
             showCalUi(true)
             binding.buttonCalibrate.isEnabled = false
