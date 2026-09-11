@@ -6,6 +6,8 @@ import androidx.lifecycle.ViewModel
 
 class ControlViewModel : ViewModel() {
 
+    private var captureChannelCount = 16
+
     // ----- Existing capture state -----
     val capturedBitmaps = MutableLiveData(MutableList<Bitmap?>(16) { null })
     val imageCount = MutableLiveData(0)
@@ -28,17 +30,27 @@ class ControlViewModel : ViewModel() {
     val pmfiSectionPercent = MutableLiveData(0)       // 0..100 for THIS section
     val pmfiSectionInfo    = MutableLiveData<String?>() // human-readable “meaning” line
     fun addBitmap(idx: Int, bitmap: Bitmap) {
-        val current = (capturedBitmaps.value ?: MutableList<Bitmap?>(16) { null }).toMutableList()
-        if (idx in 0..15) current[idx] = bitmap
-        capturedBitmaps.postValue(current)
+        val current = (capturedBitmaps.value ?: MutableList<Bitmap?>(captureChannelCount) { null }).toMutableList()
+        if (idx !in current.indices) return
+        current[idx] = bitmap
+        // Socket preview callbacks run on the main thread. Publish immediately so
+        // a burst of frames cannot overwrite a previous postValue still pending.
+        capturedBitmaps.value = current
 
         val count = current.count { it != null }
-        imageCount.postValue(count)
-        if (count == 16) sessionComplete.postValue(true)
+        imageCount.value = maxOf(imageCount.value ?: 0, count)
+        if (count == captureChannelCount) sessionComplete.value = true
+    }
+
+    fun prepareCapture(channelCount: Int) {
+        captureChannelCount = channelCount.coerceAtLeast(1)
+        capturedBitmaps.value = MutableList(captureChannelCount) { null }
+        imageCount.value = 0
+        sessionComplete.value = false
     }
     fun resetToIdle() {
         // --- AMSI capture ---
-        capturedBitmaps.postValue(MutableList(16) { null })
+        capturedBitmaps.postValue(MutableList(captureChannelCount) { null })
         imageCount.postValue(0)
         isCapturing.postValue(false)
         sessionComplete.postValue(false)
@@ -72,7 +84,7 @@ class ControlViewModel : ViewModel() {
     }
 
     fun resetCapture() {
-        capturedBitmaps.postValue(MutableList(16) { null })
+        capturedBitmaps.postValue(MutableList(captureChannelCount) { null })
         imageCount.postValue(0)
         isCapturing.postValue(false)
         sessionComplete.postValue(false)
@@ -120,7 +132,7 @@ class ControlViewModel : ViewModel() {
     }
 
     fun completeCalibration(updatedNorms: List<Double>?) {
-        if (updatedNorms != null && updatedNorms.size == 16) {
+        if (updatedNorms != null && updatedNorms.isNotEmpty()) {
             ledNorms.postValue(updatedNorms)
         }
         isCalibrating.postValue(false)

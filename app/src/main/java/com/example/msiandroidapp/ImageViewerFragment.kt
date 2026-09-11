@@ -24,6 +24,7 @@ class ImageViewerFragment : Fragment() {
     private lateinit var emptyView: TextView
     private lateinit var selectorRecycler: RecyclerView
     private var selectorAdapter: ImageSelectorAdapter? = null
+    private val captureWavelengths = com.example.msiandroidapp.ui.gallery.CaptureWavelengths()
     private val amsiWavelengths = intArrayOf(
         395, 415, 450, 470, 505, 528, 555, 570, 590, 610, 625, 640, 660, 730, 850, 880
     )
@@ -230,7 +231,7 @@ class ImageViewerFragment : Fragment() {
     private fun buildSelectorLabel(file: File, frameIdx: Int): String {
         val name = file.name
         val idx = extractImageIndex(name)
-        val wavelength = idx?.let { amsiWavelengths.getOrNull(it) }
+        val wavelength = idx?.let { captureWavelengths.forImage(file, it) }
         return when {
             Regex("(?i)cal_dark_\\d+").containsMatchIn(name) ->
                 wavelength?.let { "Dark\n$it nm" } ?: "Dark\n${idx ?: frameIdx + 1}"

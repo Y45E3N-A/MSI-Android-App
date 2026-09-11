@@ -21,7 +21,7 @@
             android:id="@+id/titleText"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="MFi Android App v4.0.0"
+            android:text="MFi Android App v4.0.1"
             android:textColor="?attr/titleTextColor"
             android:textSize="20sp"
             android:textStyle="bold"
@@ -95,11 +95,23 @@
                     android:ellipsize="end"
                     app:chipCornerRadius="20dp" />
 
+                <com.google.android.material.chip.Chip
+                    android:id="@+id/switchFanOverride"
+                    style="@style/Widget.MaterialComponents.Chip.Filter"
+                    android:layout_width="wrap_content"
+                    android:layout_height="40dp"
+                    android:layout_marginStart="8dp"
+                    android:checkable="true"
+                    android:text="Fan: Auto (always on)"
+                    android:contentDescription="Fan always on, faster above 55 degrees Celsius and maximum above 60; toggle for maximum speed"
+                    android:visibility="gone"
+                    app:chipCornerRadius="20dp" />
+
             </LinearLayout>
         </HorizontalScrollView>
     </LinearLayout>
 
-    <ScrollView
+    <com.example.msiandroidapp.ui.control.ConnectionBarrierScrollView
         android:id="@+id/controls_scrollview"
         android:layout_width="match_parent"
         android:layout_height="0dp"
@@ -116,6 +128,7 @@
             android:padding="16dp">
 
             <com.google.android.material.card.MaterialCardView
+                android:id="@+id/connectionCard"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginBottom="14dp"
@@ -301,6 +314,14 @@
                             android:insetBottom="0dp" />
                     </LinearLayout>
 
+                    <com.google.android.material.button.MaterialButton
+                        android:id="@+id/buttonDiagnostics"
+                        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                        android:layout_width="match_parent"
+                        android:layout_height="48dp"
+                        android:layout_marginTop="8dp"
+                        android:text="Diagnostics" />
+
                     <TextView
                         android:id="@+id/lastPiButtonText"
                         android:layout_width="match_parent"
@@ -310,6 +331,8 @@
                         android:textSize="15sp"
                         android:maxLines="1"
                         android:ellipsize="end" />
+
+
                 </LinearLayout>
             </com.google.android.material.card.MaterialCardView>
 
@@ -339,7 +362,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="4dp"
-                        android:text="Capture 16 wavelength images and receive them on this device."
+                        android:text="Choose wavelength channels, capture them, and receive the images on this device."
                         android:textSize="13sp"
                         android:alpha="0.75" />
 
@@ -363,6 +386,20 @@
                             android:insetTop="0dp"
                             android:insetBottom="0dp" />
 
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/buttonAmsiChannels"
+                            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+                            android:layout_width="wrap_content"
+                            android:layout_height="50dp"
+                            android:layout_marginStart="8dp"
+                            android:text="Channels"
+                            android:textSize="12sp"
+                            android:paddingStart="8dp"
+                            android:paddingEnd="8dp"
+                            android:minWidth="0dp"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp" />
+
                         <Space
                             android:layout_width="12dp"
                             android:layout_height="1dp" />
@@ -375,7 +412,7 @@
                             <TextView
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
-                                android:text="4x4 grid"
+                                android:text="Image grid"
                                 android:textSize="12sp"
                                 android:maxLines="1"
                                 android:ellipsize="end" />
@@ -395,7 +432,7 @@
                         android:layout_width="match_parent"
                         android:layout_height="wrap_content"
                         android:layout_marginTop="8dp"
-                        android:text="4x4 grid sends preview images during AMSI and may slow capture."
+                        android:text="Sending image previews during AMSI may slow capture."
                         android:textSize="12sp"
                         android:alpha="0.7" />
 
@@ -470,7 +507,7 @@
                                 android:id="@+id/amsiGridTitleText"
                                 android:layout_width="match_parent"
                                 android:layout_height="wrap_content"
-                                android:text="AMSI 4x4 Preview"
+                                android:text="AMSI Preview"
                                 android:textSize="18sp"
                                 android:textStyle="bold"
                                 android:maxLines="1"
@@ -492,7 +529,7 @@
                             style="@style/Widget.MaterialComponents.Chip.Choice"
                             android:layout_width="wrap_content"
                             android:layout_height="36dp"
-                            android:text="0/16"
+                            android:text="0"
                             android:textSize="12sp"
                             android:maxLines="1"
                             android:ellipsize="end"
@@ -987,6 +1024,7 @@
 
                     <FrameLayout
                         android:id="@+id/previewFrame"
+                        android:visibility="gone"
                         android:layout_width="match_parent"
                         android:layout_height="240dp"
                         android:layout_marginStart="16dp"
@@ -1402,7 +1440,7 @@
             </LinearLayout>
 
         </LinearLayout>
-    </ScrollView>
+    </com.example.msiandroidapp.ui.control.ConnectionBarrierScrollView>
 
     <ScrollView
         android:id="@+id/preview_scrollview"

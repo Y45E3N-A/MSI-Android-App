@@ -477,9 +477,9 @@ class GalleryFragment : Fragment() {
         val bitmaps = controlViewModel.capturedBitmaps.value ?: emptyList()
         val imageCount = controlViewModel.imageCount.value ?: 0
 
-        return if ((isCapturing || imageCount < 16) && bitmaps.any { it != null }) {
+        return if (isCapturing && bitmaps.any { it != null }) {
             ResultListItem.InProgress(bitmaps, imageCount)
-        } else if (imageCount == 16 && bitmaps.any { it != null }) {
+        } else if (imageCount > 0 && bitmaps.any { it != null }) {
             handler.postDelayed({
                 val base = galleryViewModel.results.value ?: emptyList()
                 submitMerged(applyFilterAndSort(base), forceHideInProgress = true)
@@ -525,8 +525,7 @@ class GalleryFragment : Fragment() {
 
 
     private fun openCalibration(profile: CalibrationProfile) {
-        val wlToNorm = extractCalibrationMap(profile)
-        val wlToResults = parseCalResultsJson(profile.calResultsJson)
+        val rows = calibrationRows(profile)
         val imagePaths = calibrationImagePaths(profile)
 
         val whenStr = profile.timestampStr.ifBlank {
@@ -543,22 +542,23 @@ class GalleryFragment : Fragment() {
             appendLine("When: $whenStr")
             if (!profile.summary.isNullOrBlank()) appendLine(profile.summary)
             appendLine()
-            appendLine("Wavelength (nm)    Norm       AvgDN   Avg%")
+            appendLine("Ch  Wavelength    Norm       AvgDN   Avg%")
             appendLine("------------------------------------------")
         }
 
         val body = buildString {
-            AMSI_WAVELENGTHS.forEach { wl ->
-                val norm = wlToNorm[wl]
+            rows.forEach { row ->
+                val wl = row.wavelength
+                val norm = row.norm
                 val normStr = norm?.let { String.format(Locale.US, "%.6f", it) } ?: "—"
-                val res = wlToResults[wl]
-                val avgDnStr = res?.avgDn?.let { String.format(Locale.US, "%6.1f", it) } ?: "—"
-                val avgPctStr = res?.avgPct?.let { String.format(Locale.US, "%5.1f", it) } ?: "—"
+                val avgDnStr = row.averageDn?.let { String.format(Locale.US, "%6.1f", it) } ?: "—"
+                val avgPctStr = row.averagePercent?.let { String.format(Locale.US, "%5.1f", it) } ?: "—"
                 appendLine(
                     String.format(
                         Locale.US,
-                        "%-16s %8s  %6s  %5s",
-                        "${wl}nm",
+                        "%02d  %-10s %8s  %6s  %5s",
+                        row.channel,
+                        wl?.let { "${it}nm" } ?: "Unknown",
                         normStr,
                         avgDnStr,
                         avgPctStr
@@ -1478,12 +1478,24 @@ class GalleryFragment : Fragment() {
     private fun sanitizeName(s: String): String =
         s.replace(Regex("[^A-Za-z0-9_\\- ]"), "_").replace("\\s+".toRegex(), "_")
 
-    private fun extractCalibrationMap(profile: CalibrationProfile): Map<Int, Double> {
-        val list = parseLedNormsJson(profile.ledNormsJson)
-        return if (list.size == AMSI_WAVELENGTHS.size) {
-            AMSI_WAVELENGTHS.indices.associate { i -> AMSI_WAVELENGTHS[i] to list[i] }
-        } else emptyMap()
+    private fun calibrationRows(profile: CalibrationProfile): List<CalibrationResultRow> {
+        val metadata = findCalibrationMetadataFile(calibrationImagePaths(profile))?.let {
+            runCatching { JSONObject(it.readText()) }.getOrNull()
+        }
+        val wavelengths = metadata?.optJSONArray("wavelengths")
+        return calibrationResultRows(
+            metadata?.optJSONArray("led_norms")?.toString() ?: profile.ledNormsJson,
+            metadata?.optJSONArray("results")?.toString() ?: profile.calResultsJson,
+            List(wavelengths?.length() ?: 0) { wavelengths!!.optInt(it, 0) }
+        )
     }
+
+    private fun extractCalibrationMap(profile: CalibrationProfile): Map<Int, Double> =
+        calibrationRows(profile).mapNotNull { row ->
+            val wl = row.wavelength
+            val norm = row.norm
+            if (wl != null && norm != null) wl to norm else null
+        }.toMap()
 
     private fun parseLedNormsJson(json: String?): List<Double> {
         if (json.isNullOrBlank()) return emptyList()

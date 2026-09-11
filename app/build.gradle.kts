@@ -31,6 +31,8 @@ android {
     externalNativeBuild {
         cmake {
             path = file("src/main/cpp/CMakeLists.txt")
+            // Keep CMake state outside OneDrive, like the other Gradle outputs.
+            buildStagingDirectory = rootProject.layout.buildDirectory.get().asFile.parentFile.resolve("native-staging")
         }
     }
 
@@ -85,6 +87,7 @@ dependencies {
 
     // Testing
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
 }

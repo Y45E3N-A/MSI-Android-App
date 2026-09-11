@@ -66,6 +66,38 @@ data class AmsiPreviewResponse(
     val error: String? = null
 )
 
+data class AmsiStartBody(val channels: List<Int>)
+
+data class AmsiStartResponse(
+    val ok: Boolean? = null,
+    val channels: List<Int> = emptyList(),
+    val error: String? = null
+)
+
+data class DeviceChannel(
+    val index: Int,
+    val wavelength_nm: Int? = null
+)
+
+data class DeviceCapabilities(
+    val protocol_version: Int = 1,
+    val device_model: String? = null,
+    val channel_count: Int = 16,
+    val channels: List<DeviceChannel> = emptyList(),
+    val fan_control: Boolean = false,
+    val mode_handshake_version: Int = 0
+)
+
+data class FanControlBody(val force_on: Boolean)
+data class FanStateResponse(
+    val available: Boolean = false,
+    val force_on: Boolean = false,
+    val mode: String? = null,
+    val speed: Double? = null,
+    val threshold_c: Double? = null,
+    val error: String? = null
+)
+
 // Body for /pmfi/start (server accepts any of these; at least one config must be provided)
 data class PmfiStartBody(
     val ini_text: String,
@@ -76,7 +108,31 @@ data class PmfiStartBody(
 // ------------------------------
 // Retrofit service
 // ------------------------------
+data class DiagnosticsInfo(val channels: List<DeviceChannel> = emptyList(), val fan: Boolean = false, val device_model: String? = null, val diagnostics_version: Int = 1)
+data class DiagnosticsResult(val ok: Boolean = false, val token: String? = null, val message: String? = null, val error: String? = null, val data: Map<String, Any?>? = null)
+
 interface PiApiService {
+    @GET("/diagnostics/info")
+    suspend fun diagnosticsInfo(): Response<DiagnosticsInfo>
+
+    @POST("/diagnostics/output")
+    suspend fun diagnosticsOutput(@Body body: Map<String, @JvmSuppressWildcards Any>): Response<DiagnosticsResult>
+
+    @POST("/diagnostics/test")
+    suspend fun diagnosticsTest(@Body body: Map<String, String>): Response<DiagnosticsResult>
+
+
+    @POST("/mode/prepare")
+    suspend fun prepareMode(@Body body: ModePrepareBody): Response<ModeTransitionResponse>
+
+    @POST("/mode/commit")
+    suspend fun commitMode(@Body body: ModeCommitBody): Response<ModeTransitionResponse>
+
+    @GET("/mode/status")
+    suspend fun modeStatus(@Query("request_id") requestId: String): Response<ModeTransitionResponse>
+
+    @POST("/mode/cancel")
+    suspend fun cancelMode(@Body body: ModeCancelBody): Response<ModeTransitionResponse>
 
     // --- Core ---
     @GET("/status")
@@ -92,6 +148,18 @@ interface PiApiService {
 
     @POST("/trigger")
     suspend fun triggerButton(@Query("button") buttonId: String): Response<ResponseBody> // SW2/SW3/SW4
+
+    @GET("/capabilities")
+    suspend fun capabilities(): Response<DeviceCapabilities>
+
+    @GET("/fan")
+    suspend fun fanState(): Response<FanStateResponse>
+
+    @POST("/fan")
+    suspend fun setFanMode(@Body body: FanControlBody): Response<FanStateResponse>
+
+    @POST("/amsi/start")
+    suspend fun startAmsi(@Body body: AmsiStartBody): Response<AmsiStartResponse>
     @POST("/abort")
     suspend fun abortAll(
         @Query("reason") reason: String = "aborted by client"

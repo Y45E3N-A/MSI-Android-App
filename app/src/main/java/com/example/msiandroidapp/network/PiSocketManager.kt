@@ -8,13 +8,16 @@ import com.example.msiandroidapp.util.HighBitDepthImageDecoder
 import io.socket.client.IO
 import io.socket.client.Manager
 import io.socket.client.Socket
+import io.socket.emitter.Emitter
 import org.json.JSONObject
 import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.LinkedBlockingDeque
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.CopyOnWriteArrayList
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.random.Random
 
 object PiSocketManager {
@@ -42,8 +45,15 @@ object PiSocketManager {
     private val mainHandler = Handler(Looper.getMainLooper())
     private val previewDecodeExecutor = Executors.newSingleThreadExecutor()
     private val latestPreviewPayload = AtomicReference<Any?>(null)
-    private val indexedPreviewPayloads = ConcurrentLinkedQueue<Any>()
+    private val indexedPreviewPayloads = LinkedBlockingDeque<Any>(64)
     private val previewDecodeScheduled = AtomicBoolean(false)
+    private val previewGeneration = AtomicLong(0)
+
+    fun discardPendingPreviewFrames() {
+        previewGeneration.incrementAndGet()
+        latestPreviewPayload.set(null)
+        indexedPreviewPayloads.clear()
+    }
 
     // Emit buffer for events fired before connection is up
     private data class Queued(val event: String, val data: JSONObject?)
@@ -60,6 +70,7 @@ object PiSocketManager {
     private var pmfiCompleteCallback: (() -> Unit)? = null
 
     // ---- Custom event bus (persists across reconnects) ----
+    private val customBindings = ConcurrentHashMap<String, Pair<Socket, Emitter.Listener>>()
     private val customHandlers: MutableMap<String, MutableList<(Any) -> Unit>> = ConcurrentHashMap()
 
     // ---- Connection state callback (optional) ----
@@ -67,6 +78,11 @@ object PiSocketManager {
     fun setConnectionStateListener(cb: ((Boolean) -> Unit)?) { connectionStateCallback = cb }
     fun isConnected(): Boolean = socket?.connected() == true
     fun isConnecting(): Boolean = connecting.get()
+
+    fun clearViewCallbacks(onPreview: (JSONObject, Bitmap) -> Unit, onState: (JSONObject) -> Unit) {
+        if (previewImageCallback == onPreview) previewImageCallback = null
+        if (stateUpdateCallback == onState) stateUpdateCallback = null
+    }
 
     // =========================================================
     // Public API
@@ -107,6 +123,11 @@ object PiSocketManager {
             // ---- Lifecycle ----
             on(Socket.EVENT_CONNECT) {
                 Log.d(TAG, "Socket connected")
+                socket?.emit("client.hello", JSONObject().apply {
+                    put("client", "msi-android")
+                    put("protocol_version", 2)
+                    put("supported_device_models", org.json.JSONArray(listOf("MFI-2", "MFI-3")))
+                })
                 connecting.set(false)
                 notifyConnected(true)
                 flushEmitQueue(this)
@@ -205,7 +226,6 @@ object PiSocketManager {
             connecting.set(false)
             latestPreviewPayload.set(null)
             indexedPreviewPayloads.clear()
-            previewDecodeScheduled.set(false)
             notifyConnected(false)
         }
     }
@@ -220,7 +240,16 @@ object PiSocketManager {
     /** Remove all handlers for an event. */
     fun off(event: String) {
         customHandlers.remove(event)
-        socket?.off(event)
+        customBindings.remove(event)?.let { (boundSocket, listener) ->
+            boundSocket.off(event, listener)
+        }
+    }
+
+    /** Remove one view's subscription without disturbing other consumers. */
+    fun off(event: String, handler: (Any) -> Unit) {
+        val handlers = customHandlers[event] ?: return
+        handlers.remove(handler)
+        if (handlers.isEmpty()) off(event)
     }
 
     /** Emit a custom event; if not connected yet, queue briefly. */
@@ -271,10 +300,14 @@ object PiSocketManager {
     // --- Binding helpers (ALWAYS use the passed socket 's') ---
 
     private fun bindSingle(s: Socket, event: String, handlers: List<(Any) -> Unit>) {
-        s.off(event)
-        s.on(event) { args ->
-            val payload: Any? = args.firstOrNull()?.let { parsePayload(it) }
-            if (payload != null) {
+        // Remove only our custom listener, preserving built-in connection handling.
+        customBindings.remove(event)?.let { (previousSocket, listener) ->
+            previousSocket.off(event, listener)
+        }
+        val listener = Emitter.Listener { args ->
+            // Socket.IO lifecycle events (including connect) may have no payload.
+            val payload: Any = args.firstOrNull()?.let { parsePayload(it) } ?: JSONObject()
+            postToMain {
                 handlers.forEach { h ->
                     try { h(payload) } catch (e: Exception) {
                         Log.e(TAG, "Handler for '$event' threw", e)
@@ -282,6 +315,8 @@ object PiSocketManager {
                 }
             }
         }
+        customBindings[event] = s to listener
+        s.on(event, listener)
     }
 
     private fun bindEvent(s: Socket, event: String, dispatcher: (Any?) -> Unit) {
@@ -319,7 +354,10 @@ object PiSocketManager {
     private fun enqueuePreviewDecode(payload: Any?) {
         if (payload == null) return
         if (isIndexedPreviewPayload(payload)) {
-            indexedPreviewPayloads.offer(payload)
+            if (!indexedPreviewPayloads.offer(payload)) {
+                indexedPreviewPayloads.poll()
+                indexedPreviewPayloads.offer(payload)
+            }
         } else {
             latestPreviewPayload.set(payload)
         }
@@ -334,11 +372,22 @@ object PiSocketManager {
     private fun drainPreviewFrames() {
         try {
             while (true) {
+                val generation = previewGeneration.get()
                 val next = indexedPreviewPayloads.poll()
                     ?: latestPreviewPayload.getAndSet(null)
                     ?: break
                 val (json, bmp) = extractBitmapFromPayload(next) ?: continue
-                postToMain { previewImageCallback?.invoke(json, bmp) }
+                // At most one decoded bitmap may wait on the UI thread. Without
+                // backpressure, long previews accumulate bitmaps in the main queue.
+                val delivered = CountDownLatch(1)
+                postToMain {
+                    try {
+                        if (generation == previewGeneration.get()) previewImageCallback?.invoke(json, bmp)
+                    } finally {
+                        delivered.countDown()
+                    }
+                }
+                delivered.await()
             }
         } catch (e: Exception) {
             Log.e(TAG, "preview decode loop error", e)
@@ -392,7 +441,7 @@ object PiSocketManager {
         } ?: return false
 
         return listOf("index", "idx", "i", "channel", "led").any { key ->
-            json.has(key) && json.optInt(key, -1) in 0..15
+            json.has(key) && json.optInt(key, -1) >= 0
         }
     }
 

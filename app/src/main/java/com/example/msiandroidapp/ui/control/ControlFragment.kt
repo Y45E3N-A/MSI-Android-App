@@ -11,7 +11,10 @@ import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.FrameLayout
+import android.widget.GridLayout
 import android.widget.ImageView
+import android.widget.TextView
+import android.view.Gravity
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.core.content.ContextCompat
@@ -23,8 +26,13 @@ import androidx.lifecycle.repeatOnLifecycle
 import com.example.msiandroidapp.R
 import com.example.msiandroidapp.databinding.FragmentControlBinding
 import com.example.msiandroidapp.network.PiApi
+import com.example.msiandroidapp.network.ModeHandshake
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.sync.Mutex
 import com.example.msiandroidapp.network.PiSocketManager
 import com.example.msiandroidapp.network.PmfiStartBody
+import com.example.msiandroidapp.network.AmsiStartBody
+import com.example.msiandroidapp.network.FanControlBody
 import com.example.msiandroidapp.util.UploadProgressBus
 import com.google.android.gms.location.LocationServices
 import kotlinx.coroutines.Job
@@ -69,6 +77,26 @@ private suspend fun lastKnownLocationStr(ctx: Context): String {
 
 class ControlFragment : Fragment() {
 
+    private val socketSubscriptions = mutableListOf<Pair<String, (Any) -> Unit>>()
+
+    private fun onSocketEvent(event: String, handler: (Any) -> Unit) {
+        val ownerBinding = _binding ?: return
+        val guarded: (Any) -> Unit = { payload ->
+            runOnViewThread {
+                if (_binding === ownerBinding) handler(payload)
+            }
+        }
+        socketSubscriptions += event to guarded
+        PiSocketManager.on(event, guarded)
+    }
+
+    private fun runOnViewThread(block: () -> Unit) {
+        val ownerBinding = _binding ?: return
+        activity?.runOnUiThread {
+            if (isAdded && _binding === ownerBinding) block()
+        }
+    }
+
     // ===== View binding (lifecycle-safe) =====
     private var _binding: FragmentControlBinding? = null
     private val binding: FragmentControlBinding
@@ -99,12 +127,18 @@ class ControlFragment : Fragment() {
     private var calDarkFrameSeen = false
     private var calExtraImagesExpected = 0
     private var calDarkImagesUploaded = 0
+    private var calUploadedImages = 0
+    private var calUploadTotalImages = 16
     private var calInfoLine: String = ""
     private var calStageLine: String = ""
     private var calExpectedImages = 16
     private var calTotalChannels = 16
 
     // Track preview state mirrored from server
+    private var modeHandshakeVersion = 0
+    private var modeTransitionInProgress = false
+    private var serverTransitionInProgress = false
+    private val modeTransitionMutex = Mutex()
     private var previewActive = false
     private var previewRequestedState: Boolean? = null
     private var previewRequestPendingUntil: Long = 0L
@@ -113,6 +147,12 @@ class ControlFragment : Fragment() {
     private var wasPreviewOnBeforeAmsi = false
     private var amsiSocketPreviewEnabled = false
     private var amsiSocketPreviewToggleInFlight = false
+    private var deviceChannelCount = 16
+    private var channelWavelengths: List<Int?> = List(16) { null }
+    private var selectedAmsiChannels: Set<Int> = (0 until 16).toSet()
+    private var capabilitiesReady = false
+    private var fanControlAvailable = false
+    private var fanRequestInFlight = false
 
     // Preview UI
     private enum class PreviewMode {
@@ -138,9 +178,15 @@ class ControlFragment : Fragment() {
     private var latestHumidity: Double? = null
     private var latestEnvIso: String? = null
     private var lastEnvEventAt: Long = 0L
+    private var latestCpuTempC: Double? = null
+    private var latestCpuTempIso: String? = null
+    private var lastCpuTempEventAt: Long = 0L
+    private var showingCpuTemp: Boolean = false
+    private var lastThermalThrottleToastAt: Long = 0L
 
     // Poll fallback every 20s if we haven't seen a socket event recently
     private val envPollMs = 20_000L
+    private val cpuTempPollMs = 20_000L
 
     private val pollMs = 5_000L
     private val disconnectGraceMs = 3_000L
@@ -167,6 +213,7 @@ class ControlFragment : Fragment() {
     // If we haven't seen an env event in a while, attempt a light HTTP poll
 
     private fun showPreviewOffState() {
+        binding.previewFrame.visibility = View.GONE
         mode = PreviewMode.OFF
         previewActive = false
 
@@ -183,6 +230,7 @@ class ControlFragment : Fragment() {
     }
 
     private fun showPreviewStartingState() {
+        binding.previewFrame.visibility = View.VISIBLE
         mode = PreviewMode.STARTING
 
         liveImage = null
@@ -200,6 +248,7 @@ class ControlFragment : Fragment() {
     private fun startLivePreview() {
         if (mode == PreviewMode.LIVE_FEED && liveImage != null) return
 
+        binding.previewFrame.visibility = View.VISIBLE
         mode = PreviewMode.LIVE_FEED
         previewActive = true
 
@@ -239,8 +288,8 @@ class ControlFragment : Fragment() {
         mode = PreviewMode.AMSI_GRID
         showAmsiGrid()
 
-        binding.amsiGridStatusChip.text = "0/16"
-        binding.amsiGridProgressBar.max = 16
+        binding.amsiGridStatusChip.text = "0/$amsiCaptureTotal"
+        binding.amsiGridProgressBar.max = amsiCaptureTotal
         binding.amsiGridProgressBar.progress = 0
 
         gridImages.forEach { imageView ->
@@ -256,7 +305,7 @@ class ControlFragment : Fragment() {
     private fun hideAmsiGrid() {
         binding.amsiGridCard.visibility = View.GONE
         binding.amsiGridProgressBar.progress = 0
-        binding.amsiGridStatusChip.text = "0/16"
+        binding.amsiGridStatusChip.text = "0/$amsiCaptureTotal"
 
         gridImages.forEach { imageView ->
             imageView.setImageResource(android.R.drawable.ic_menu_gallery)
@@ -267,15 +316,15 @@ class ControlFragment : Fragment() {
     private fun updateGrid(bitmaps: List<Bitmap?>) {
         if (gridImages.isEmpty()) return
 
-        val received = bitmaps.count { it != null }.coerceIn(0, 16)
+        val received = bitmaps.count { it != null }.coerceIn(0, amsiCaptureTotal)
 
         showAmsiGrid()
 
-        binding.amsiGridProgressBar.max = 16
+        binding.amsiGridProgressBar.max = amsiCaptureTotal
         binding.amsiGridProgressBar.progress = received
-        binding.amsiGridStatusChip.text = "$received/16"
+        binding.amsiGridStatusChip.text = "$received/$amsiCaptureTotal"
 
-        for (i in 0 until 16) {
+        for (i in gridImages.indices) {
             val imageView = gridImages.getOrNull(i) ?: continue
             val bitmap = bitmaps.getOrNull(i)
 
@@ -291,22 +340,22 @@ class ControlFragment : Fragment() {
 
     private fun amsiPreviewIndex(data: JSONObject): Int {
         var idx = data.optInt("index", -1)
-        if (idx !in 0..15) idx = data.optInt("idx", -1)
-        if (idx !in 0..15) idx = data.optInt("i", -1)
-        if (idx !in 0..15) idx = data.optInt("channel", -1)
-        if (idx !in 0..15) idx = data.optInt("led", -1)
+        if (idx !in 0 until deviceChannelCount) idx = data.optInt("idx", -1)
+        if (idx !in 0 until deviceChannelCount) idx = data.optInt("i", -1)
+        if (idx !in 0 until deviceChannelCount) idx = data.optInt("channel", -1)
+        if (idx !in 0 until deviceChannelCount) idx = data.optInt("led", -1)
         return idx
     }
 
     private fun addAmsiGridBitmap(data: JSONObject, bmp: Bitmap) {
         var idx = amsiPreviewIndex(data)
 
-        if (idx !in 0..15) {
-            val current = vm.capturedBitmaps.value ?: List(16) { null }
+        if (idx !in 0 until deviceChannelCount) {
+            val current = vm.capturedBitmaps.value ?: List(deviceChannelCount) { null }
             idx = current.indexOfFirst { it == null }.takeIf { it >= 0 } ?: -1
         }
 
-        if (idx in 0..15) {
+        if (idx in 0 until deviceChannelCount) {
             if (mode != PreviewMode.AMSI_GRID) {
                 mode = PreviewMode.AMSI_GRID
                 showAmsiGrid()
@@ -316,6 +365,11 @@ class ControlFragment : Fragment() {
     }
     override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
         super.onViewCreated(view, savedInstanceState)
+        binding.controlsScrollview.setConnectionCard(binding.connectionCard)
+        binding.topConnectionChip.contentDescription = "Connection status; tap to show connection controls"
+        binding.topConnectionChip.setOnClickListener {
+            binding.controlsScrollview.revealConnection()
+        }
 
         // ----- Cache a few views for preview area -----
         previewContainer = binding.previewContainer
@@ -348,20 +402,50 @@ class ControlFragment : Fragment() {
         // ===== Initial UI wiring / click handlers =====
         setupButtons()
         observeUploadProgress()
+        hookSystemThrottleSocket()
+        hookCpuTempSocket()
 
         // ===== Socket listeners (core connection + env + battery + cal + amsi + pmfi) =====
         hookSocketCore()      // "connect", "disconnect", "error" → updateConnUi(...)
         hookEnvSocket()       // "env.update" → renderEnv(...)
         hookBatterySocket()   // "battery.update" → renderBatteryFromJson(...)
+        onSocketEvent("device.capabilities") { payload ->
+            val capabilities = payload as? JSONObject ?: return@onSocketEvent
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread { applyDeviceCapabilities(capabilities) }
+        }
+        onSocketEvent("fan.state") { payload ->
+            val state = payload as? JSONObject ?: return@onSocketEvent
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread { renderFanState(state.optBoolean("force_on", false)) }
+        }
 
         // --- AMSI progress/status from Pi. This stays useful even when Socket.IO image previews are off. ---
-        PiSocketManager.on("amsi.started") { payload ->
+        onSocketEvent("amsi.started") { payload ->
             val j = payload as? JSONObject
             val sessionId = j?.optString("session_id")?.takeIf { it.isNotBlank() }
             val channels = j?.optInt("channels", 16) ?: 16
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread {
+                val availableChannels = j?.optInt("available_channels", deviceChannelCount)
+                    ?.coerceAtLeast(1) ?: deviceChannelCount
+                if (availableChannels != deviceChannelCount || j?.has("wavelengths") == true) {
+                    val wavelengths = j?.optJSONArray("wavelengths")
+                    applyDeviceCapabilities(JSONObject().apply {
+                        put("channel_count", availableChannels)
+                        put("fan_control", fanControlAvailable)
+                        put("channels", org.json.JSONArray().apply {
+                            repeat(availableChannels) { index ->
+                                put(JSONObject().apply {
+                                    put("index", index)
+                                    put("wavelength_nm", wavelengths?.optInt(index, 0) ?: 0)
+                                })
+                            }
+                        })
+                    })
+                }
                 currentAmsiRunId = sessionId
+                currentAmsiStage = "capturing"
                 amsiCaptureTotal = channels.coerceAtLeast(1)
                 amsiZipUploadNotified = false
                 isCaptureOngoing = true
@@ -369,7 +453,7 @@ class ControlFragment : Fragment() {
                 setUiBusy(true)
                 if (amsiSocketPreviewEnabled) {
                     startImageGrid()
-                    vm.capturedBitmaps.value = MutableList(amsiCaptureTotal) { null }
+                    vm.prepareCapture(deviceChannelCount)
                 } else {
                     clearPreview()
                 }
@@ -377,21 +461,90 @@ class ControlFragment : Fragment() {
             }
         }
 
-        PiSocketManager.on("amsi.progress") { payload ->
-            val j = payload as? JSONObject ?: return@on
+        onSocketEvent("amsi.progress") { payload ->
+            val j = payload as? JSONObject ?: return@onSocketEvent
+            val sessionId = j.optString("session_id").takeIf { it.isNotBlank() }
             val total = j.optInt("total", amsiCaptureTotal).coerceAtLeast(1)
-            val done = (j.optInt("index", -1) + 1).coerceAtLeast(0)
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
+            val serverPercent = j.optInt("percent_complete", -1).takeIf { it in 0..100 }
+            val done = when {
+                j.has("completed") -> j.optInt("completed", 0)
+                j.has("percent_complete") -> {
+                    val pct = j.optInt("percent_complete", 0).coerceIn(0, 100)
+                    ((pct / 100.0) * total).toInt().coerceAtLeast(0)
+                }
+                else -> j.optInt("index", -1) + 1
+            }.coerceIn(0, total)
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread {
+                if (sessionId != null && currentAmsiRunId != null && sessionId != currentAmsiRunId) {
+                    return@runOnViewThread
+                }
+                if (currentAmsiRunId == null) currentAmsiRunId = sessionId
+                if (currentAmsiStage.isNotBlank() && currentAmsiStage != "capturing") {
+                    return@runOnViewThread
+                }
+                currentAmsiStage = "capturing"
                 isCaptureOngoing = true
                 vm.isCapturing.value = true
-                setAmsiCapturing(done, total)
+                val current = binding.captureProgressBar.progress
+                val wavelengthNm = j.optJSONObject("capture")?.optInt("wavelength_nm", -1) ?: -1
+                val statusText = if (wavelengthNm > 0) {
+                    val shownDone = maxOf(current, done)
+                    val shownPercent = if (shownDone == done) serverPercent else null
+                    "Capturing $wavelengthNm nm: $shownDone/$total (${percentText(shownDone, total, shownPercent)})"
+                } else {
+                    null
+                }
+                setAmsiCapturing(maxOf(current, done), total, statusText)
             }
         }
 
-        PiSocketManager.on("amsi.uploaded") { _payload ->
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
+        onSocketEvent("amsi.stage") { payload ->
+            val j = payload as? JSONObject ?: return@onSocketEvent
+            val sessionId = j.optString("session_id").takeIf { it.isNotBlank() }
+            val stage = j.optString("stage", "").lowercase(Locale.UK)
+            val total = j.optInt("total", amsiCaptureTotal).coerceAtLeast(1)
+            val completed = j.optInt("completed", binding.captureProgressBar.progress).coerceIn(0, total)
+            val serverPercent = j.optInt("percent_complete", -1).takeIf { it in 0..100 }
+            val message = j.optString("message", "").takeIf { it.isNotBlank() }
+            val wavelengthNm = j.optInt("wavelength_nm", -1)
+            val fallback = when (stage) {
+                "capturing" -> if (wavelengthNm > 0) {
+                    "Capturing $wavelengthNm nm: $completed/$total (${percentText(completed, total, serverPercent)})"
+                } else {
+                    "Capturing on MFi: $completed/$total (${percentText(completed, total, serverPercent)})"
+                }
+                "converting" -> "Converting images to PNG: $completed/$total (${percentText(completed, total, serverPercent)})"
+                "packing" -> "Packing AMSI ZIP"
+                "uploading" -> "Uploading AMSI ZIP..."
+                "upload_complete" -> "AMSI ZIP upload complete"
+                "upload_failed" -> "AMSI ZIP upload failed"
+                else -> "AMSI: $completed/$total"
+            }
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread {
+                if (sessionId != null && currentAmsiRunId != null && sessionId != currentAmsiRunId) {
+                    return@runOnViewThread
+                }
+                if (currentAmsiRunId == null) currentAmsiRunId = sessionId
+                currentAmsiStage = stage
+                isCaptureOngoing = stage !in setOf("upload_complete", "upload_failed")
+                vm.isCapturing.value = isCaptureOngoing
+                when (stage) {
+                    "capturing" -> setAmsiCapturing(completed, total, message ?: fallback)
+                    "converting" -> showAmsiProgress(completed, total, message ?: fallback)
+                    "packing" -> showAmsiProgress(amsiCaptureTotal, amsiCaptureTotal, message ?: fallback)
+                    "uploading" -> setAmsiUploadingZip(message ?: fallback)
+                    "upload_complete" -> setAmsiUploadComplete(message ?: fallback)
+                    "upload_failed" -> showAmsiProgress(0, 1, message ?: fallback)
+                    else -> showAmsiProgress(completed, total, message ?: fallback)
+                }
+            }
+        }
+
+        onSocketEvent("amsi.uploaded") { _payload ->
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread {
                 if (!amsiZipUploadNotified) {
                     amsiZipUploadNotified = true
                     setAmsiUploadComplete()
@@ -399,9 +552,9 @@ class ControlFragment : Fragment() {
             }
         }
 
-        PiSocketManager.on("amsi.complete") { _payload ->
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
+        onSocketEvent("amsi.complete") { _payload ->
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread {
                 setAmsiUploadComplete()
                 isCaptureOngoing = false
                 vm.isCapturing.value = false
@@ -412,6 +565,7 @@ class ControlFragment : Fragment() {
                     binding.captureProgressBar.visibility = View.GONE
                     binding.captureProgressText.visibility = View.GONE
                     currentAmsiRunId = null
+                    currentAmsiStage = ""
                     if (wasPreviewOnBeforeAmsi) kickPreviewResume()
                     wasPreviewOnBeforeAmsi = false
                 }
@@ -419,85 +573,131 @@ class ControlFragment : Fragment() {
         }
 
         // --- AMSI abort/error from Pi ---
-        PiSocketManager.on("amsi_error") { _payload ->
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
+        onSocketEvent("amsi_error") { _payload ->
+            if (!isAdded) return@onSocketEvent
+            val errorMessage = (_payload as? JSONObject)?.optString("message")
+            runOnViewThread {
                 isCaptureOngoing = false
                 vm.isCapturing.value = false
                 binding.captureProgressBar.visibility = View.GONE
                 binding.captureProgressText.visibility = View.GONE
+                currentAmsiStage = ""
 
                 clearPreview()
                 setUiBusy(false)
                 if (wasPreviewOnBeforeAmsi) kickPreviewResume()
                 wasPreviewOnBeforeAmsi = false
-                toast("Capture aborted")
+                toast(errorMessage?.takeIf { it.isNotBlank() } ?: "Capture failed")
             }
         }
 
 
         // --- Calibration progress / complete / error from Pi ---
         // We'll inline what used to be hookCalibrationSocket(), but with the fixed cleanup-on-error
-        PiSocketManager.on("cal_plan") { payload ->
-            val j = payload as? JSONObject ?: return@on
-            val channels = j.optInt("channels", 16)
+        onSocketEvent("cal_plan") { payload ->
+            val j = payload as? JSONObject ?: return@onSocketEvent
+            val channels = j.optInt("channels", deviceChannelCount)
             val darkExpected = j.optInt("dark_images_expected", 0)
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread {
                 calTotalChannels = channels
                 vm.startCalibration(totalChannels = channels)
                 calDarkFrameSeen = darkExpected > 0
                 calExtraImagesExpected = darkExpected.coerceAtLeast(0)
                 calExpectedImages = channels.coerceAtLeast(1)
                 calDarkImagesUploaded = 0
+                calUploadedImages = 0
+                calUploadTotalImages = (channels + darkExpected.coerceAtLeast(0)).coerceAtLeast(channels.coerceAtLeast(1))
                 calStageLine = ""
                 calInfoLine = ""
-                binding.calProgressBar.max = calExpectedImages
+                binding.calProgressBar.setDeterminateProgress(0, calExpectedImages)
                 if (binding.calProgressBar.visibility != View.VISIBLE) {
                     binding.calProgressBar.visibility = View.VISIBLE
                 }
                 if (binding.calProgressText.visibility != View.VISIBLE) {
                     binding.calProgressText.visibility = View.VISIBLE
                 }
-                binding.calProgressText.text = "Calibration: 0/${binding.calProgressBar.max}"
+                binding.calProgressText.text = "Calibration: 0/${binding.calProgressBar.max} (0%)"
             }
         }
 
-        PiSocketManager.on("cal_stage") { payload ->
-            val j = payload as? JSONObject ?: return@on
+        onSocketEvent("cal_stage") { payload ->
+            val j = payload as? JSONObject ?: return@onSocketEvent
             val stage = j.optString("stage", "")
             val ch = j.optInt("channel_index", -1)
-            val total = j.optInt("total_channels", 16).coerceAtLeast(1)
+            val total = j.optInt("total_channels", deviceChannelCount).coerceAtLeast(1)
+            val orderTotal = j.optInt("order_total", total).coerceAtLeast(1)
+            val serverPercent = j.optInt("percent_complete", -1).takeIf { it in 0..100 }
+            val orderedDone = when {
+                j.has("completed") -> j.optInt("completed", 0)
+                j.has("order_position") -> j.optInt("order_position", 0)
+                else -> ch + 1
+            }.coerceIn(0, orderTotal)
             val wl = j.optInt("wavelength_nm", -1)
             val stageNorm = if (j.has("led_norm")) j.optDouble("led_norm", Double.NaN) else Double.NaN
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread {
                 calTotalChannels = total
-                binding.calProgressBar.max = total
+                binding.calProgressBar.max = orderTotal
                 val stageKey = stage.lowercase(Locale.US)
                 if (ch >= 0 && (stageKey == "capturing_dark" || stageKey == "calibrating")) {
-                    binding.calProgressBar.progress = (ch + 1).coerceIn(0, total)
+                    binding.calProgressBar.setDeterminateProgress(orderedDone, orderTotal)
                 }
-                val channelText = if (ch >= 0) "${ch + 1}/$total" else ""
-                val wlText = if (wl > 0) " ${wl}nm" else ""
+                val wlText = if (wl > 0) " ${wl} nm" else ""
                 calStageLine = when (stageKey) {
-                    "capturing_dark" -> "Capturing dark$wlText${if (channelText.isNotBlank()) " ($channelText)" else ""}"
-                    "calibrating" -> ""
-                    "uploading" -> "Uploading calibration files"
+                    "capturing_dark" -> "Capturing dark$wlText"
+                    "calibrating" -> "Calibrating$wlText"
+                    "channel_complete" -> {
+                        binding.calProgressBar.setDeterminateProgress(orderedDone, orderTotal)
+                        "Calibrated$wlText"
+                    }
+                    "uploading" -> {
+                        binding.calProgressBar.showIndeterminateHorizontal()
+                        "Uploading calibration images"
+                    }
+                    "packing" -> {
+                        binding.calProgressBar.showIndeterminateHorizontal()
+                        "Packing calibration ZIP"
+                    }
+                    "uploading_zip" -> {
+                        binding.calProgressBar.showIndeterminateHorizontal()
+                        "Uploading calibration ZIP"
+                    }
+                    "upload_complete" -> {
+                        binding.calProgressBar.setDeterminateProgress(1, 1)
+                        "Calibration ZIP uploaded"
+                    }
+                    "upload_failed" -> {
+                        binding.calProgressBar.setDeterminateProgress(0, 1)
+                        "Calibration ZIP upload failed"
+                    }
+                    "uploading_metadata" -> {
+                        binding.calProgressBar.showIndeterminateHorizontal()
+                        "Uploading calibration metadata"
+                    }
                     else -> stage.replace('_', ' ')
                 }
-                if (stage.equals("calibrating", true) && !stageNorm.isNaN()) {
-                    val ledLabel = if (wl > 0) "${wl}nm" else "LED ${ch + 1}"
-                    calInfoLine = "$ledLabel - norm ${String.format(Locale.US, "%.2f", stageNorm)}"
+                if (stageKey != "calibrating") {
+                    calInfoLine = ""
                 }
-                updateCalProgressText()
+                if (stage.equals("calibrating", true) && !stageNorm.isNaN()) {
+                    calInfoLine = "norm ${String.format(Locale.US, "%.2f", stageNorm)}"
+                }
+                updateCalProgressText(serverPercent)
             }
         }
 
-        PiSocketManager.on("cal_progress") { payload ->
-            val j = payload as? JSONObject ?: return@on
+        onSocketEvent("cal_progress") { payload ->
+            val j = payload as? JSONObject ?: return@onSocketEvent
             val channelIndexPayload = j.optInt("channel_index", 0)
-            val totalChannelsPayload = j.optInt("total_channels", 16)
+            val totalChannelsPayload = j.optInt("total_channels", deviceChannelCount)
+            val orderTotalPayload = j.optInt("order_total", totalChannelsPayload).coerceAtLeast(1)
+            val serverPercentPayload = j.optInt("percent_complete", -1).takeIf { it in 0..100 }
+            val orderedDonePayload = when {
+                j.has("completed") -> j.optInt("completed", 0)
+                j.has("order_position") -> j.optInt("order_position", 0)
+                else -> channelIndexPayload + 1
+            }.coerceIn(0, orderTotalPayload)
             val wavelengthPayload = j.optInt("wavelength_nm", -1)
             val averagePayload = j.optDouble("average_intensity", -1.0)
             val normPrevPayload = j.optDouble("led_norm_prev", -1.0)
@@ -510,8 +710,8 @@ class ControlFragment : Fragment() {
                 normPrev          = normPrevPayload,
                 normNew           = normNewPayload,
             )
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread {
                 // Ensure we're marked busy during cal, in case this was Pi-initiated
                 isCalibratingOngoing = true
                 vm.isCalibrating.value = true
@@ -520,50 +720,92 @@ class ControlFragment : Fragment() {
                 refreshCalExpectedImages()
                 binding.calProgressBar.visibility = View.VISIBLE
                 binding.calProgressText.visibility = View.VISIBLE
-                val channelIndex = channelIndexPayload
-                val totalChannels = totalChannelsPayload.coerceAtLeast(1)
-                binding.calProgressBar.max = totalChannels
-                binding.calProgressBar.progress = (channelIndex + 1).coerceIn(0, totalChannels)
-                calStageLine = ""
+                binding.calProgressBar.setDeterminateProgress(orderedDonePayload, orderTotalPayload)
+                calStageLine = if (wavelengthPayload > 0) {
+                    "Calibrating $wavelengthPayload nm"
+                } else {
+                    "Calibrating"
+                }
 
-                calInfoLine =
-                    "${if (wavelengthPayload > 0) wavelengthPayload.toString() else "-"}nm - " +
-                            "avg=${if (averagePayload >= 0.0) String.format(Locale.US, "%.1f", averagePayload) else "-"} - " +
-                            "norm ${if (normPrevPayload >= 0.0) String.format(Locale.US, "%.2f", normPrevPayload) else "-"}->" +
-                            if (normNewPayload >= 0.0) String.format(Locale.US, "%.2f", normNewPayload) else "-"
-                updateCalProgressText()
+                val frameMean = j.optDouble("frame_mean_dn", Double.NaN)
+                val saturatedPct = j.optDouble("saturated_pct", Double.NaN)
+                calInfoLine = buildString {
+                    append("iteration ${j.optInt("iteration", 0)}")
+                    if (frameMean.isFinite()) append(String.format(Locale.US, " | image avg %.1f DN (%.1f%%)", frameMean, frameMean / 255.0 * 100.0))
+                    if (averagePayload >= 0.0) append(String.format(Locale.US, " | metric %.1f DN", averagePayload))
+                    if (normNewPayload >= 0.0) append(String.format(Locale.US, " | norm %.4f", normNewPayload))
+                    if (saturatedPct >= 1.0) append(String.format(Locale.US, " | saturated %.1f%%", saturatedPct))
+                }
+                updateCalProgressText(serverPercentPayload)
             }
         }
 
-        PiSocketManager.on("cal_uploaded") { payload ->
-            val j = payload as? JSONObject ?: return@on
+        onSocketEvent("cal_uploaded") { payload ->
+            val j = payload as? JSONObject ?: return@onSocketEvent
             val imageType = j.optString("image_type", "")
             val fileName = j.optString("file", "")
+            val uploaded = j.optBoolean("uploaded", true)
+            val zippedImages = j.optInt("images", 0)
             val isDark = imageType.equals("dark", true) || fileName.contains("dark", true)
             if (isDark) calDarkFrameSeen = true
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
-                calDarkImagesUploaded += 1
-                refreshCalExpectedImages()
-                calStageLine = "Uploading calibration files"
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread {
+                if (imageType.equals("zip", true)) {
+                    val imageCount = zippedImages.coerceAtLeast(calUploadTotalImages.coerceAtLeast(calTotalChannels))
+                    calUploadedImages = if (uploaded) imageCount else 0
+                    calUploadTotalImages = imageCount
+                    binding.calProgressBar.setDeterminateProgress(calUploadedImages, imageCount)
+                    binding.calProgressBar.visibility = View.VISIBLE
+                    binding.calProgressText.visibility = View.VISIBLE
+                    calStageLine = if (uploaded) "Calibration ZIP uploaded" else "Calibration ZIP upload failed"
+                    calInfoLine = if (uploaded) "$imageCount images" else ""
+                    updateCalProgressText()
+                    return@runOnViewThread
+                }
+
+                if (uploaded) {
+                    calUploadedImages += 1
+                    if (isDark) calDarkImagesUploaded += 1
+                }
+                val totalFromPlan = calUploadTotalImages.coerceAtLeast(calTotalChannels.coerceAtLeast(1))
+                calUploadTotalImages = totalFromPlan
+                binding.calProgressBar.showIndeterminateHorizontal()
+                binding.calProgressText.visibility = View.VISIBLE
+                calStageLine = "Uploading calibration images"
                 updateCalProgressText()
             }
         }
 
         // cal_complete
-        PiSocketManager.on("cal_complete") { payload ->
+        onSocketEvent("cal_complete") { payload ->
             val j = payload as? JSONObject
             val norms = j?.optJSONArray("led_norms")
-            if (norms != null && norms.length() == 16) {
+            vm.completeCalibration(norms?.let { values -> List(values.length()) { values.optDouble(it) } })
+            val appContext = context?.applicationContext ?: return@onSocketEvent
+            val runId = j?.optString("session_id").orEmpty()
+            val results = j?.optJSONArray("results")
+            if (runId.isNotBlank() && results != null && results.length() > 0) {
+                // Save results even when the HTTP metadata upload was interrupted.
+                viewLifecycleOwner.lifecycleScope.launch(Dispatchers.IO) {
+                    try {
+                        com.example.msiandroidapp.data.AppDatabase.getDatabase(appContext)
+                            .calibrationDao().upsertCalibrationMetadata(
+                                runId, norms?.toString(), results.toString(),
+                                null, null, null, null, j?.optString("ts_utc")
+                            )
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Could not persist calibration results", e)
+                    }
+                }
+            }
+            if (norms != null && norms.length() == deviceChannelCount) {
                 val prefs = requireActivity().getSharedPreferences("APP_SETTINGS", Context.MODE_PRIVATE)
                 prefs.edit().putString("led_norms_json", norms.toString()).apply()
             }
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread {
                 refreshCalExpectedImages()
-                binding.calProgressBar.progress = binding.calProgressBar.max
-                binding.calProgressBar.progress =
-                    binding.calProgressBar.progress.coerceAtMost(binding.calProgressBar.max)
+                binding.calProgressBar.setDeterminateProgress(binding.calProgressBar.max, binding.calProgressBar.max)
                 calCooldownUntil = now() + 1_500L
                 endCalibrationUi("Calibration complete")
                 // Nudge a fresh state from Pi, but UI is already unlocked
@@ -572,15 +814,16 @@ class ControlFragment : Fragment() {
         }
 
 // cal_error
-        PiSocketManager.on("cal_error") { payload ->
+        onSocketEvent("cal_error") { payload ->
             val message = (payload as? JSONObject)
                 ?.optString("message")
                 ?.takeIf { it.isNotBlank() }
                 ?: "Calibration aborted"
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread {
                 vm.failCalibration()
                 calCooldownUntil = now() + 1_500L
+                if (binding.calProgressBar.isIndeterminate) binding.calProgressBar.isIndeterminate = false
                 endCalibrationUi(message)
                 PiSocketManager.emit("get_state", JSONObject())
             }
@@ -589,7 +832,7 @@ class ControlFragment : Fragment() {
 
 
         // --- PMFI SOCKET EVENT BINDINGS ---
-        PiSocketManager.on("pmfi.plan") { payload ->
+        onSocketEvent("pmfi.plan") { payload ->
             val j = payload as JSONObject
             val totalFrames  = j.optInt("total_frames", 0)
             val sectionCount = j.optInt("section_count", 0)
@@ -614,9 +857,10 @@ class ControlFragment : Fragment() {
             lastSectionIndexForTot = -1
             lastSecDoneForTot = 0
 
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread {
                 // hide any AMSI remnants
+                if (binding.captureProgressBar.isIndeterminate) binding.captureProgressBar.isIndeterminate = false
                 binding.captureProgressBar.progress = 0
                 binding.captureProgressBar.visibility = View.GONE
                 binding.captureProgressText.text = ""
@@ -636,13 +880,13 @@ class ControlFragment : Fragment() {
             }
         }
 
-        PiSocketManager.on("pmfi.stage") { payload ->
+        onSocketEvent("pmfi.stage") { payload ->
             val j = payload as JSONObject
             vm.pmfiCurrentSection.postValue(j.optString("section", null))
             vm.pmfiSectionState.postValue(j.optString("state", ""))
         }
 
-        PiSocketManager.on("pmfi.progress") { payload ->
+        onSocketEvent("pmfi.progress") { payload ->
             val j = payload as JSONObject
 
             val secIdx0  = j.optInt("section_index", 0)
@@ -684,12 +928,12 @@ class ControlFragment : Fragment() {
             vm.pmfiPercent.postValue(totPct)
         }
 
-        PiSocketManager.on("pmfi.sectionUploaded") { payload ->
+        onSocketEvent("pmfi.sectionUploaded") { payload ->
             val j = payload as JSONObject
             val section = j.optString("section", "")
             val bytes   = j.optLong("bytes", -1L)
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread {
                 val human = if (bytes > 0) {
                     String.format(
                         Locale.getDefault(),
@@ -703,17 +947,17 @@ class ControlFragment : Fragment() {
             }
         }
 
-        PiSocketManager.on("pmfi.log") { payload ->
+        onSocketEvent("pmfi.log") { payload ->
             vm.pmfiLogLine.postValue((payload as JSONObject).optString("line"))
         }
 
-        PiSocketManager.on("pmfi.complete") { payload ->
+        onSocketEvent("pmfi.complete") { payload ->
             val ok = (payload as JSONObject).optBoolean("ok", true)
             vm.pmfiComplete.postValue(ok)
             vm.pmfiPercent.postValue(100)
 
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread {
                 pmfiCumOffset = 0
                 pmfiLastTot   = 0
                 isPmfiRunning = false
@@ -741,9 +985,10 @@ class ControlFragment : Fragment() {
         // ===== connection-state listener (socket layer high-level up/down) =====
         PiSocketManager.setConnectionStateListener { connected ->
             if (!isAdded) return@setConnectionStateListener
-            requireActivity().runOnUiThread {
+            runOnViewThread {
                 if (connected) {
                     updateConnUi(true)
+                    fetchDeviceCapabilities()
                 } else {
                     // model -> idle
                     vm.resetToIdle()
@@ -757,13 +1002,12 @@ class ControlFragment : Fragment() {
 
         // ===== Restore any in-flight AMSI capture UI from ViewModel (rotation, etc.) =====
         val restoredCount = vm.imageCount.value ?: 0
-        val restoredImgs  = vm.capturedBitmaps.value ?: List(16) { null }
-        if (restoredCount in 1..16 || restoredImgs.any { it != null }) {
+        val restoredImgs  = vm.capturedBitmaps.value ?: List(deviceChannelCount) { null }
+        if (restoredCount in 1..deviceChannelCount || restoredImgs.any { it != null }) {
             startImageGrid()
             updateGrid(restoredImgs)
-            binding.captureProgressBar.max = 16
-            binding.captureProgressBar.progress = restoredCount
-            binding.captureProgressText.text = "Capturing on Pi: $restoredCount/16"
+            binding.captureProgressBar.setDeterminateProgress(restoredCount, amsiCaptureTotal)
+            binding.captureProgressText.text = "Capturing on MFi: $restoredCount/$amsiCaptureTotal"
             binding.captureProgressBar.visibility = View.VISIBLE
             binding.captureProgressText.visibility = View.VISIBLE
         }
@@ -771,22 +1015,25 @@ class ControlFragment : Fragment() {
         // ===== LiveData observers → keep UI reactive =====
         vm.capturedBitmaps.observe(viewLifecycleOwner) {
             if (amsiSocketPreviewEnabled || mode == PreviewMode.AMSI_GRID) {
-                updateGrid(it ?: List(16) { null })
+                updateGrid(it ?: List(deviceChannelCount) { null })
             }
         }
 
         vm.imageCount.observe(viewLifecycleOwner) { c ->
-            binding.captureProgressBar.progress = c
-            binding.captureProgressText.text = "Capturing on Pi: $c/16"
+            binding.captureProgressText.text = "Capturing on MFi: $c/$amsiCaptureTotal"
             when {
-                c in 1..15 -> {
+                c in 1 until amsiCaptureTotal -> {
+                    binding.captureProgressBar.setDeterminateProgress(c, amsiCaptureTotal)
                     binding.captureProgressBar.visibility = View.VISIBLE
                     binding.captureProgressText.visibility = View.VISIBLE
                 }
-                c == 16 -> {
+                c == amsiCaptureTotal -> {
+                    binding.captureProgressBar.showIndeterminateHorizontal()
                     binding.captureProgressText.text = "Uploading AMSI ZIP..."
+                    binding.captureProgressText.visibility = View.VISIBLE
                 }
                 else -> {
+                    if (binding.captureProgressBar.isIndeterminate) binding.captureProgressBar.isIndeterminate = false
                     binding.captureProgressBar.visibility = View.GONE
                     binding.captureProgressText.visibility = View.GONE
                 }
@@ -922,6 +1169,7 @@ class ControlFragment : Fragment() {
     }
     // Returns true if the instrument should be treated as BUSY (user must not start anything else)
     private fun isGlobalBusy(): Boolean {
+        if (modeTransitionInProgress || serverTransitionInProgress) return true
         if (now() < calStartGraceUntil) return true
         val inCalCooldown = now() < calCooldownUntil
         val calFlag = (isCalibratingOngoing || vm.isCalibrating.value == true) && !inCalCooldown
@@ -932,6 +1180,8 @@ class ControlFragment : Fragment() {
     private fun resetUiToFreshState() {
         isPiConnected = false
         isConnecting = false
+        serverTransitionInProgress = false
+        modeHandshakeVersion = 0
 
         // Connection strip
         binding.piConnectionStatus.text = "Status: Unknown"
@@ -943,6 +1193,10 @@ class ControlFragment : Fragment() {
         binding.chipBattery.setChipIconResource(R.drawable.ic_battery_unknown_24)
 
         // ---- Clear env chips ----
+        showingCpuTemp = false
+        latestCpuTempC = null
+        latestCpuTempIso = null
+        lastCpuTempEventAt = 0L
         binding.topTempChip.text = "Temp: —"
         binding.topHumChip.text  = "RH: —"
 
@@ -964,6 +1218,7 @@ class ControlFragment : Fragment() {
         wasPreviewOnBeforeAmsi = false
 
         // AMSI progress
+        if (binding.captureProgressBar.isIndeterminate) binding.captureProgressBar.isIndeterminate = false
         binding.captureProgressBar.progress = 0
         binding.captureProgressBar.visibility = View.GONE
         binding.captureProgressText.text = ""
@@ -971,9 +1226,12 @@ class ControlFragment : Fragment() {
 
         // Calibration progress
         binding.calProgressBar.progress = 0
+        if (binding.calProgressBar.isIndeterminate) binding.calProgressBar.isIndeterminate = false
         binding.calProgressBar.visibility = View.GONE
         binding.calProgressText.text = ""
         binding.calProgressText.visibility = View.GONE
+        calUploadedImages = 0
+        calUploadTotalImages = deviceChannelCount
 
         // PMFI global
         binding.pmfiProgressBar.progress = 0
@@ -1048,6 +1306,12 @@ class ControlFragment : Fragment() {
         stopPolling()
         disconnectJob?.cancel()
         disconnectJob = null
+        socketSubscriptions.forEach { (event, handler) -> PiSocketManager.off(event, handler) }
+        socketSubscriptions.clear()
+        PiSocketManager.clearViewCallbacks(::onPreviewImage, ::onStateUpdate)
+        PiSocketManager.setConnectionStateListener(null)
+        liveImage?.setImageDrawable(null)
+        liveImage = null
         _binding = null
         super.onDestroyView()
     }
@@ -1073,10 +1337,13 @@ class ControlFragment : Fragment() {
         isCalibratingOngoing = false
 
         // ---- Hide cal widgets ----
+        if (binding.calProgressBar.isIndeterminate) binding.calProgressBar.isIndeterminate = false
         binding.calProgressBar.progress = 0
         binding.calProgressBar.visibility = View.GONE
         binding.calProgressText.text = ""
         binding.calProgressText.visibility = View.GONE
+        calUploadedImages = 0
+        calUploadTotalImages = deviceChannelCount
 
         // ---- Clear any residual busy from other modes that calibration might have set ----
         isCaptureOngoing = false
@@ -1143,6 +1410,11 @@ class ControlFragment : Fragment() {
             connectSocket()
             checkStatus(ip)
         }
+        binding.topTempChip.setOnClickListener {
+            showingCpuTemp = !showingCpuTemp
+            renderTemperatureChip()
+            if (showingCpuTemp) pollCpuTempOnce()
+        }
         binding.pmfiExpandBtn.setOnClickListener {
             val ctx = requireContext()
             val intent = Intent(ctx, PmfiEditorActivity::class.java).apply {
@@ -1181,7 +1453,7 @@ class ControlFragment : Fragment() {
                 isCaptureOngoing -> {
                     AlertDialog.Builder(requireContext())
                         .setTitle("Image capture in progress")
-                        .setMessage("Disconnecting will abort the 16-image capture. Disconnect anyway?")
+                        .setMessage("Disconnecting will abort the current AMSI capture. Disconnect anyway?")
                         .setPositiveButton("Disconnect") { _, _ -> forceDisconnect() }
                         .setNegativeButton("Cancel", null)
                         .show()
@@ -1195,28 +1467,30 @@ class ControlFragment : Fragment() {
         // Preview toggle (SW4)
         attachPreviewToggleListener()
         attachAmsiSocketPreviewToggleListener()
+        binding.switchFanOverride.setOnCheckedChangeListener { _, checked ->
+            if (fanControlAvailable && !fanRequestInFlight) setFanOverride(checked)
+        }
 
+
+        binding.buttonDiagnostics.setOnClickListener {
+            if (isPiConnected && !isGlobalBusy()) {
+                startActivity(Intent(requireContext(), com.example.msiandroidapp.ui.diagnostics.DiagnosticsActivity::class.java))
+            } else toast("Connect to an idle instrument first")
+        }
+
+        binding.buttonAmsiChannels.setOnClickListener {
+            if (isPiConnected && capabilitiesReady && !isGlobalBusy()) showAmsiChannelDialog {}
+        }
 
         // AMSI (SW2)
         binding.buttonStartAmsi.setOnClickListener {
-            if (!isPiConnected) { toast("Pi not connected"); return@setOnClickListener }
+            if (!capabilitiesReady) { toast("Waiting for device channel information"); return@setOnClickListener }
+            if (!isPiConnected) { toast("MFi not connected"); return@setOnClickListener }
             val gotLock = tryBeginBusy("amsi"); if (!gotLock) { toast("Busy"); return@setOnClickListener }
 
             viewLifecycleOwner.lifecycleScope.launch {
                 // 1) Remember if preview (warming) was ON before we stop it
                 wasPreviewOnBeforeAmsi = lastSw4FromServer || binding.switchCameraPreview.isChecked || previewActive
-
-                // 2) Stop preview in background (server will hard-stop before capture)
-                ensurePreviewOffAsync(1500)
-                val ok = true
-                if (!ok && lastSw4FromServer) {
-                    // Could not turn preview off — fail fast & unlock
-                    isCaptureOngoing = false
-                    vm.isCapturing.value = false
-                    setUiBusy(false)
-                    toast("Preview did not stop — try again")
-                    return@launch
-                }
 
                 val useAmsiGrid = ensureAmsiSocketPreviewEnabledForCapture()
 
@@ -1228,16 +1502,23 @@ class ControlFragment : Fragment() {
                     clearPreview()
                 }
                 startCaptureUi()
-                vm.capturedBitmaps.value = MutableList(16) { null }
+                amsiCaptureTotal = selectedAmsiChannels.size
+                vm.prepareCapture(deviceChannelCount)
                 vm.imageCount.value = 0
                 binding.buttonStartAmsi.isEnabled = false
                 binding.buttonStartAmsi.alpha = 0.4f
 
-                // 4) Trigger SW2 (AMSI start)
-                runCatching { triggerButton("SW2") }.onFailure { e ->
+                runCatching {
+                    performModeTransition("amsi", channels = selectedAmsiChannels.sorted())
+                }.onFailure { e ->
+                    if (e is CancellationException) throw e
                     toast("Failed to start capture: ${e.localizedMessage}")
                     isCaptureOngoing = false
                     vm.isCapturing.value = false
+                    currentAmsiStage = ""
+                    clearPreview()
+                    binding.captureProgressBar.visibility = View.GONE
+                    binding.captureProgressText.visibility = View.GONE
                     setUiBusy(false)
                     binding.buttonStartAmsi.isEnabled = true
                     binding.buttonStartAmsi.alpha = 1f
@@ -1255,23 +1536,19 @@ class ControlFragment : Fragment() {
             resetCalExpectedImages()
             calStageLine = ""
             calInfoLine = ""
-            vm.startCalibration(totalChannels = 16)
+            vm.startCalibration(totalChannels = deviceChannelCount)
             showCalUi(true)
             binding.buttonCalibrate.isEnabled = false
             binding.buttonCalibrate.alpha = 0.4f
 
             viewLifecycleOwner.lifecycleScope.launch {
-                ensurePreviewOffAsync(1500)
-                val ok = true
-                if (!ok && lastSw4FromServer) {
-                    isCalibratingOngoing = false
-                    vm.isCalibrating.value = false
-                    setUiBusy(false)
-                    toast("Preview did not stop — try again")
-                    return@launch
+                try {
+                    performModeTransition("calibration")
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    endCalibrationUi("Calibration could not start: ${e.localizedMessage}")
                 }
-
-                triggerButton("SW3") // end/unlock via cal_complete / cal_error
             }
         }
 
@@ -1288,16 +1565,6 @@ class ControlFragment : Fragment() {
             binding.pmfiStartBtn.text = "PMFI running…"
 
             viewLifecycleOwner.lifecycleScope.launch {
-                ensurePreviewOffAsync(1500)
-                val ok = true
-                if (!ok && lastSw4FromServer) {
-                    isPmfiRunning = false
-                    setUiBusy(false)
-                    setPmfiButtonBusy(false)
-                    binding.pmfiStartBtn.text = "Start PMFI"
-                    toast("Preview did not stop — try again")
-                    return@launch
-                }
                 startPmfi(iniText)
             }
         }
@@ -1312,7 +1579,7 @@ class ControlFragment : Fragment() {
             if (isPmfiRunning) { toast("PMFI running – wait for completion"); return@setOnClickListener }
             AlertDialog.Builder(requireContext())
                 .setTitle("Shutdown System")
-                .setMessage("Are you sure you want to shut down the Pi and instrument?")
+                .setMessage("Are you sure you want to shut down the MFi device?")
                 .setPositiveButton("Shutdown") { _, _ -> sendShutdown() }
                 .setNegativeButton("Cancel", null).show()
         }
@@ -1328,8 +1595,7 @@ class ControlFragment : Fragment() {
         }
 
         // Initial progress widgets
-        binding.captureProgressBar.max = 16
-        binding.captureProgressBar.progress = 0
+        binding.captureProgressBar.setDeterminateProgress(0, 16)
         binding.captureProgressBar.visibility = View.GONE
         binding.captureProgressText.visibility = View.GONE
         binding.switchAmsiSocketPreview.isChecked = amsiSocketPreviewEnabled
@@ -1367,7 +1633,6 @@ class ControlFragment : Fragment() {
 
             viewLifecycleOwner.lifecycleScope.launch {
                 requestPreviewSet(checked)
-                delay(400)
                 binding.switchCameraPreview.isEnabled = isPiConnected && !isGlobalBusy()
                 binding.switchCameraPreview.alpha =
                     if (binding.switchCameraPreview.isEnabled) 1f else 0.4f
@@ -1422,8 +1687,8 @@ class ControlFragment : Fragment() {
                 if (resp.isSuccessful && confirmed != null) {
                     amsiSocketPreviewEnabled = confirmed
                     toast(
-                        if (confirmed) "4x4 AMSI preview enabled - capture will be slower"
-                        else "4x4 AMSI preview disabled for faster capture"
+                        if (confirmed) "AMSI image grid enabled - capture will be slower"
+                        else "AMSI image grid disabled for faster capture"
                     )
                 } else {
                     toast("AMSI preview toggle failed: ${resp.code()}")
@@ -1460,7 +1725,7 @@ class ControlFragment : Fragment() {
             confirmed
         } catch (e: Exception) {
             if (isAdded) {
-                toast("4x4 AMSI preview could not be enabled: ${e.localizedMessage}")
+                toast("AMSI image grid could not be enabled: ${e.localizedMessage}")
             }
             false
         }
@@ -1482,63 +1747,82 @@ class ControlFragment : Fragment() {
         return previewRequestedState != null && nowMs < previewRequestPendingUntil
     }
 
-    private fun requestPreviewSet(targetOn: Boolean) {
-        if (targetOn) {
-            showPreviewStartingState()
-        } else {
-            showPreviewOffState()
-        }
-
-        previewActive = targetOn
-
-        if (lastSw4FromServer == targetOn) {
-            clearPreviewRequest()
-            if (targetOn) startLivePreview() else showPreviewOffState()
-            return
-        }
-
-        markPreviewRequest(targetOn)
-        runCatching { triggerButton("SW4") }
+    private suspend fun requestPreviewSet(targetOn: Boolean) {
+        ensurePreviewSet(targetOn)
     }
 
-    private suspend fun ensurePreviewSet(targetOn: Boolean, timeoutMs: Long = 2_000L): Boolean {
-        if (targetOn) {
-            showPreviewStartingState()
-        } else {
-            showPreviewOffState()
-        }
-
-        if (lastSw4FromServer == targetOn) {
+    private suspend fun ensurePreviewSet(targetOn: Boolean, timeoutMs: Long = 20_000L): Boolean {
+        return try {
+            performModeTransition(if (targetOn) "preview" else "idle")
             previewActive = targetOn
+            lastSw4FromServer = targetOn
             clearPreviewRequest()
+            binding.switchCameraPreview.setOnCheckedChangeListener(null)
+            binding.switchCameraPreview.isChecked = targetOn
+            attachPreviewToggleListener()
             if (targetOn) startLivePreview() else showPreviewOffState()
-            return true
-        }
-
-        markPreviewRequest(targetOn)
-        runCatching { triggerButton("SW4") }
-
-        val start = System.currentTimeMillis()
-        while ((System.currentTimeMillis() - start) < timeoutMs) {
-            if (lastSw4FromServer == targetOn) {
-                previewActive = targetOn
-                clearPreviewRequest()
-                if (targetOn) startLivePreview() else showPreviewOffState()
-                return true
-            }
-            delay(40)
-        }
-
-        if (!targetOn) {
-            previewActive = false
-            showPreviewOffState()
-        }
-
-        if (!isPreviewRequestPending()) {
+            true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
             clearPreviewRequest()
+            showPreviewOffState()
+            toast("Mode change failed: ${e.localizedMessage}")
+            PiSocketManager.emit("get_state", JSONObject())
+            false
         }
+    }
 
-        return lastSw4FromServer == targetOn
+    private suspend fun performModeTransition(
+        targetMode: String, channels: List<Int>? = null,
+        iniText: String? = null, sessionId: String? = null
+    ) {
+        val transitionBinding = binding
+        check(modeTransitionMutex.tryLock()) { "Another mode change is in progress" }
+        modeTransitionInProgress = true
+        clearPreviewRequest()
+        clearLiveOnly()
+        PiSocketManager.discardPendingPreviewFrames()
+        setUiBusy(true)
+        try {
+            if (modeHandshakeVersion < 1) {
+                // Verify with the Pi before rejecting a start based on cached state.
+                val capabilities = PiApi.api.capabilities()
+                check(capabilities.isSuccessful && capabilities.body() != null) {
+                    "Could not verify server mode support (HTTP ${capabilities.code()}); reconnect and retry"
+                }
+                modeHandshakeVersion = capabilities.body()!!.mode_handshake_version
+            }
+            check(modeHandshakeVersion >= 1) {
+                "Connected MFI server reports no mode handshake support; update and restart its server"
+            }
+            ModeHandshake.start(
+                api = PiApi.api, mode = targetMode, channels = channels,
+                iniText = iniText, sessionId = sessionId,
+                appReady = {
+                    if (targetMode in setOf("amsi", "calibration", "pmfi")) {
+                        com.example.msiandroidapp.service.UploadForegroundService.awaitReady(requireContext())
+                    }
+                    PiSocketManager.discardPendingPreviewFrames()
+                    if (targetMode == "preview") showPreviewStartingState()
+                },
+                onPhase = { message ->
+                    when (targetMode) {
+                        "amsi" -> binding.captureProgressText.text = message
+                        "calibration" -> binding.calProgressText.text = message
+                        "pmfi" -> binding.pmfiStageLabel.text = message
+                        else -> binding.previewSubtitleText.text = message
+                    }
+                }
+            )
+        } finally {
+            modeTransitionInProgress = false
+            modeTransitionMutex.unlock()
+            if (_binding === transitionBinding) {
+                setUiBusy(isGlobalBusy())
+                PiSocketManager.emit("get_state", JSONObject())
+            }
+        }
     }
 
     // Convenience: ensure preview is OFF before running a job.
@@ -1550,31 +1834,50 @@ class ControlFragment : Fragment() {
     }
     // Keep track of the AMSI run we’re receiving
     private var currentAmsiRunId: String? = null
+    private var currentAmsiStage: String = ""
     private var amsiCaptureTotal = 16
     private var amsiZipUploadNotified = false
     private val amsiZipBytesByRun = mutableMapOf<String, Long>()
 
+    private fun percentText(done: Int, total: Int, serverPercent: Int? = null): String {
+        if (serverPercent != null && serverPercent in 0..100) return "$serverPercent%"
+        val safeTotal = total.coerceAtLeast(1)
+        val pct = Math.round((done.coerceIn(0, safeTotal) * 100.0) / safeTotal).toInt()
+        return "$pct%"
+    }
+
+    private fun ProgressBar.setDeterminateProgress(progress: Int, maxValue: Int) {
+        if (isIndeterminate) isIndeterminate = false
+        max = maxValue.coerceAtLeast(1)
+        this.progress = progress.coerceIn(0, max)
+    }
+
+    private fun ProgressBar.showIndeterminateHorizontal() {
+        if (!isIndeterminate) isIndeterminate = true
+        visibility = View.VISIBLE
+    }
+
     private fun startCaptureUi() {
-        amsiCaptureTotal = 16
+        amsiCaptureTotal = selectedAmsiChannels.size.coerceAtLeast(1)
         amsiZipUploadNotified = false
+        currentAmsiStage = "capturing"
         setAmsiCapturing(0, amsiCaptureTotal)
     }
     private fun showAmsiProgress(progress: Int, max: Int = amsiCaptureTotal, text: String) {
-        binding.captureProgressBar.max = max.coerceAtLeast(1)
-        binding.captureProgressBar.progress = progress.coerceIn(0, binding.captureProgressBar.max)
+        binding.captureProgressBar.setDeterminateProgress(progress, max)
         binding.captureProgressText.text = text
         binding.captureProgressBar.visibility = View.VISIBLE
         binding.captureProgressText.visibility = View.VISIBLE
     }
 
-    private fun setAmsiCapturing(done: Int, total: Int = amsiCaptureTotal) {
+    private fun setAmsiCapturing(done: Int, total: Int = amsiCaptureTotal, text: String? = null) {
         amsiCaptureTotal = total.coerceAtLeast(1)
         val safeDone = done.coerceIn(0, amsiCaptureTotal)
 
         showAmsiProgress(
             progress = safeDone,
             max = amsiCaptureTotal,
-            text = "Capturing on Pi: $safeDone/$amsiCaptureTotal"
+            text = text ?: "Capturing on MFi: $safeDone/$amsiCaptureTotal (${percentText(safeDone, amsiCaptureTotal)})"
         )
 
         if (amsiSocketPreviewEnabled) {
@@ -1585,19 +1888,17 @@ class ControlFragment : Fragment() {
         }
     }
 
-    private fun setAmsiUploadingZip() {
-        showAmsiProgress(
-            progress = amsiCaptureTotal,
-            max = amsiCaptureTotal,
-            text = "Uploading AMSI ZIP..."
-        )
+    private fun setAmsiUploadingZip(text: String = "Uploading AMSI ZIP...") {
+        binding.captureProgressBar.showIndeterminateHorizontal()
+        binding.captureProgressText.text = text
+        binding.captureProgressText.visibility = View.VISIBLE
     }
 
-    private fun setAmsiUploadComplete() {
+    private fun setAmsiUploadComplete(text: String = "AMSI ZIP upload complete") {
         showAmsiProgress(
             progress = amsiCaptureTotal,
             max = amsiCaptureTotal,
-            text = "AMSI ZIP upload complete"
+            text = text
         )
 
         if (amsiSocketPreviewEnabled) {
@@ -1618,18 +1919,18 @@ class ControlFragment : Fragment() {
 
         UploadProgressBus.uploadProgress.observe(viewLifecycleOwner) { (sessionId, count) ->
             // Ignore replayed/stale emissions from previous app sessions
-            if (sessionId == lastHandledRunId && count == 16) return@observe
+            if (sessionId == lastHandledRunId && count == amsiCaptureTotal) return@observe
 
             // Ignore if we’re not currently doing AMSI
             if (isPmfiRunning || (vm.isCalibrating.value == true)) return@observe
 
             // First image → mark as active run
-            if (count in 1..16 && currentAmsiRunId == null) currentAmsiRunId = sessionId
+            if (count in 1..amsiCaptureTotal && currentAmsiRunId == null) currentAmsiRunId = sessionId
 
             Log.d(TAG, "Upload progress $sessionId : $count")
             vm.imageCount.value = count
-            binding.captureProgressBar.progress = count
-            binding.captureProgressText.text = "Saving images: $count/16"
+            binding.captureProgressBar.setDeterminateProgress(count, 16)
+            binding.captureProgressText.text = "Saving images: $count/$amsiCaptureTotal"
 
             when {
                 count in 1..15 -> {
@@ -1638,7 +1939,7 @@ class ControlFragment : Fragment() {
                     binding.captureProgressText.visibility = View.VISIBLE
                 }
 
-                count == 16 -> {
+                count == amsiCaptureTotal -> {
                     lastHandledRunId = sessionId
                     vm.isCapturing.value = false
                     binding.captureProgressText.text = "AMSI ZIP upload complete"
@@ -1682,12 +1983,55 @@ class ControlFragment : Fragment() {
 
     private fun hookBatterySocket() {
         // payload is the snapshot (server emits it flat)
-        PiSocketManager.on("battery.update") { payload ->
+        onSocketEvent("battery.update") { payload ->
             val root = payload as org.json.JSONObject
             lastBatteryEventAt = System.currentTimeMillis()
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread {
                 renderBatteryFromJson(root)
+            }
+        }
+    }
+
+    private fun hookSystemThrottleSocket() {
+        onSocketEvent("system.throttle") { payload ->
+            val root = payload as? org.json.JSONObject ?: return@onSocketEvent
+            val flags = root.optJSONObject("flags")
+            val thermalActive = root.optBoolean("thermal_throttle_active") ||
+                (flags?.optBoolean("currently_throttled") == true) ||
+                (flags?.optBoolean("soft_temperature_limit_active") == true)
+            val thermalOccurred = root.optBoolean("thermal_throttle_occurred")
+            val powerActive = root.optBoolean("power_throttle_active")
+            val rawHex = root.optString("hex", root.optString("raw", ""))
+            val tempC = root.optDoubleOrNull("temp_c")
+            val tempText = tempC?.let { String.format(Locale.UK, "%.1f C", it) } ?: "unknown temp"
+            if (tempC != null) {
+                latestCpuTempC = tempC
+                latestCpuTempIso = root.optString("ts_utc").takeIf { it.isNotBlank() }
+                lastCpuTempEventAt = System.currentTimeMillis()
+                if (isAdded) {
+                    runOnViewThread {
+                        renderTemperatureChip()
+                    }
+                }
+            }
+
+            if (thermalActive || thermalOccurred || powerActive) {
+                Log.w(
+                    "ControlFragment",
+                    "system.throttle $rawHex temp=$tempText thermalActive=$thermalActive " +
+                        "thermalOccurred=$thermalOccurred powerActive=$powerActive"
+                )
+            } else {
+                Log.i("ControlFragment", "system.throttle $rawHex temp=$tempText")
+            }
+
+            if (!thermalActive || !isAdded) return@onSocketEvent
+            val now = System.currentTimeMillis()
+            if (now - lastThermalThrottleToastAt < 60_000L) return@onSocketEvent
+            lastThermalThrottleToastAt = now
+            runOnViewThread {
+                toast("Thermal throttling detected ($tempText)")
             }
         }
     }
@@ -1706,7 +2050,7 @@ class ControlFragment : Fragment() {
                         val obj = org.json.JSONObject(body)
                         val snap = obj.optJSONObject("battery") ?: return
                         if (!isAdded) return
-                        requireActivity().runOnUiThread {
+                        runOnViewThread {
                             renderBatteryFromJson(snap)
                         }
                     } catch (_: Exception) { /* ignore */ }
@@ -1723,32 +2067,22 @@ class ControlFragment : Fragment() {
         }
 
         val state   = snap.optString("charging_state", null)?.uppercase() ?: "UNKNOWN"
-        val present = if (snap.has("present")) snap.optBoolean("present") else null
+        val present = if (snap.has("present") && !snap.isNull("present")) snap.optBoolean("present") else null
         val soc     = snap.optIntOrNull("soc_pct")
         val volt    = snap.optDoubleOrNull("voltage_v")
-        val current = snap.optDoubleOrNull("current_a")
-
-        val isLow = soc != null && soc < batteryLowThresholdPct
-        val isPluggedIn = state == "NOT_CHARGING" && current != null && current <= 0.03
-        val isOnBattery = state == "NOT_CHARGING" && current != null && current > 0.03
-
-        // Choose icon
-        val iconRes = when (state) {
-            "CHARGING"   -> R.drawable.ic_battery_charging_24
-            "FAULT"      -> R.drawable.ic_battery_alert_24
-            "NO_BATTERY" -> R.drawable.ic_battery_unknown_24
-            "NOT_CHARGING" -> when {
-                present == false -> R.drawable.ic_battery_unknown_24
-                isLow -> R.drawable.ic_battery_alert_24
-                isPluggedIn -> R.drawable.ic_battery_charging_24
-                isOnBattery -> R.drawable.ic_battery_24
-                else -> R.drawable.ic_battery_24
-            }
-            else -> when {
-                present == false -> R.drawable.ic_battery_unknown_24
-                isLow -> R.drawable.ic_battery_alert_24
-                else -> R.drawable.ic_battery_24
-            }
+        val indicator = batteryIndicator(state, present, soc, batteryLowThresholdPct)
+        val iconRes = when (indicator) {
+            BatteryIndicator.CHARGING -> R.drawable.ic_battery_charging_24
+            BatteryIndicator.LOW, BatteryIndicator.FAULT -> R.drawable.ic_battery_alert_24
+            BatteryIndicator.UNKNOWN -> R.drawable.ic_battery_unknown_24
+            BatteryIndicator.NORMAL -> R.drawable.ic_battery_24
+        }
+        val statusText = when (indicator) {
+            BatteryIndicator.CHARGING -> "Charging"
+            BatteryIndicator.LOW -> "Low battery, not charging"
+            BatteryIndicator.FAULT -> "Battery charger fault"
+            BatteryIndicator.UNKNOWN -> "Battery status unavailable"
+            BatteryIndicator.NORMAL -> "Not charging"
         }
 
         // Label: prefer %; else show voltage
@@ -1759,7 +2093,16 @@ class ControlFragment : Fragment() {
         }
 
         binding.chipBattery.text = label
+        binding.chipBattery.contentDescription = "$label, $statusText"
         binding.chipBattery.setChipIconResource(iconRes)
+        binding.chipBattery.isChipIconVisible = true
+        binding.chipBattery.chipIconTint = android.content.res.ColorStateList.valueOf(
+            when (indicator) {
+                BatteryIndicator.CHARGING -> android.graphics.Color.rgb(46, 125, 50)
+                BatteryIndicator.LOW, BatteryIndicator.FAULT -> android.graphics.Color.rgb(198, 40, 40)
+                else -> binding.chipBattery.currentTextColor
+            }
+        )
     }
 
     // JSON helpers
@@ -1796,6 +2139,9 @@ class ControlFragment : Fragment() {
                         val now = System.currentTimeMillis()
                         if (now - lastEnvEventAt > envPollMs) {
                             pollEnvOnce()
+                        }
+                        if (now - lastCpuTempEventAt > cpuTempPollMs) {
+                            pollCpuTempOnce()
                         }
                         if (System.currentTimeMillis() - lastBatteryEventAt > batteryPollMs) {
                             pollBatteryOnce()
@@ -1834,7 +2180,7 @@ class ControlFragment : Fragment() {
                 if (!isAdded) return
                 consecutiveStatusFailures = 0
                 lastOkTimestamp = System.currentTimeMillis()
-                requireActivity().runOnUiThread { updateConnUi(true) }
+                runOnViewThread { updateConnUi(true) }
                 cancelPendingDisconnect()
             }
         })
@@ -1863,8 +2209,40 @@ class ControlFragment : Fragment() {
                         latestEnvIso = ts
 
                         if (!isAdded) return
-                        requireActivity().runOnUiThread {
+                        runOnViewThread {
                             renderEnv(latestTempC, latestHumidity, latestEnvIso)
+                        }
+                    } catch (_: Exception) { /* ignore */ }
+                }
+            }
+        })
+    }
+
+    private fun pollCpuTempOnce() {
+        val ip = currentIp
+        if (ip.isBlank()) return
+        val req = Request.Builder().url("http://$ip:5000/cpu").get().build()
+        quickClient.newCall(req).enqueue(object : okhttp3.Callback {
+            override fun onFailure(call: okhttp3.Call, e: IOException) {
+                // Ignore quietly; socket is primary path
+            }
+            override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+                response.use {
+                    if (!it.isSuccessful) return
+                    val body = it.body?.string().orEmpty()
+                    try {
+                        val root = org.json.JSONObject(body)
+                        val cpu = root.optJSONObject("cpu") ?: root
+                        val t = cpu.optDouble("temp_c", Double.NaN)
+                        val ts = cpu.optString("ts_utc", null)
+
+                        latestCpuTempC = if (t.isNaN()) null else t
+                        latestCpuTempIso = ts
+                        lastCpuTempEventAt = System.currentTimeMillis()
+
+                        if (!isAdded) return
+                        runOnViewThread {
+                            renderTemperatureChip()
                         }
                     } catch (_: Exception) { /* ignore */ }
                 }
@@ -1913,6 +2291,9 @@ class ControlFragment : Fragment() {
 
             // clear local flags so UI unlocks immediately
             isPiConnected = false
+            capabilitiesReady = false
+            fanControlAvailable = false
+            binding.switchFanOverride.visibility = View.GONE
             isConnecting = false
             isCaptureOngoing = false
             isPmfiRunning = false
@@ -1928,7 +2309,7 @@ class ControlFragment : Fragment() {
             // jump user back to start tab
             (activity as? MainActivity)?.goToStartPage()
 
-            toast("Disconnected from Pi")
+            toast("Disconnected from MFi")
         }
     }
 
@@ -1977,38 +2358,44 @@ class ControlFragment : Fragment() {
             cancelPendingDisconnect()
         } else if (connected == false) {
             isPiConnected = false
+            capabilitiesReady = false
+            fanControlAvailable = false
+            binding.switchFanOverride.visibility = View.GONE
             isConnecting = false
         }
+
+        binding.controlsScrollview.setDeviceConnected(isPiConnected)
 
 // use the single source of truth
         val busy = isGlobalBusy()
         setUiBusy(busy && isPiConnected)
 
         binding.ipInputLayout.helperText = when (connected) {
-            false -> "Check the Pi IP in your phone hotspot settings, then update it here."
-            else -> "Use the Pi IP shown in your phone hotspot settings."
+            false -> "Check the MF IP in your phone hotspot settings, then update it here."
+            else -> "Use the MFi IP shown in your phone hotspot settings."
         }
 
     }
 
     // ===== Socket handlers (core + calibration) =====
     private fun hookSocketCore() {
-        PiSocketManager.on("connect") {
-            if (!isAdded) return@on
-            requireActivity().runOnUiThread {
+        onSocketEvent("connect") {
+            if (!isAdded) return@onSocketEvent
+            runOnViewThread {
                 updateConnUi(true)
                 syncAmsiSocketPreviewToggle()
+                fetchDeviceCapabilities()
             }
         }
-        PiSocketManager.on("disconnect") { scheduleDebouncedDisconnect() }
-        PiSocketManager.on("connect_error") { scheduleDebouncedDisconnect() }
-        PiSocketManager.on("error") { scheduleDebouncedDisconnect() }
+        onSocketEvent("disconnect") { scheduleDebouncedDisconnect() }
+        onSocketEvent("connect_error") { scheduleDebouncedDisconnect() }
+        onSocketEvent("error") { scheduleDebouncedDisconnect() }
     }
     // ===== Environment (Temp / Humidity) socket + render =====
     // In ControlFragment (or wherever hookEnvSocket() lives)
     private fun hookEnvSocket() {
         // Pi sends either a JSONObject, a JSON string, or a Map
-        PiSocketManager.on("env.update") { payload ->
+        onSocketEvent("env.update") { payload ->
             try {
                 val obj: org.json.JSONObject? = when (payload) {
                     is org.json.JSONObject -> payload
@@ -2019,7 +2406,7 @@ class ControlFragment : Fragment() {
 
                 if (obj == null) {
                     Log.w("ControlFragment", "env.update: unexpected payload type: ${payload?.javaClass?.name}")
-                    return@on
+                    return@onSocketEvent
                 }
 
                 // Support both: { env:{ temp_c, humidity, ts_utc } } and flat { temp_c, humidity, ts_utc }
@@ -2051,12 +2438,43 @@ class ControlFragment : Fragment() {
                     }
                 }
 
-                if (!isAdded) return@on
-                requireActivity().runOnUiThread {
+                if (!isAdded) return@onSocketEvent
+                runOnViewThread {
                     renderEnv(latestTempC, latestHumidity, latestEnvIso)
                 }
             } catch (t: Throwable) {
                 Log.e("ControlFragment", "Handler for 'env.update' failed", t)
+            }
+        }
+    }
+
+    private fun hookCpuTempSocket() {
+        onSocketEvent("cpu.temp") { payload ->
+            try {
+                val obj: org.json.JSONObject? = when (payload) {
+                    is org.json.JSONObject -> payload
+                    is String -> runCatching { org.json.JSONObject(payload) }.getOrNull()
+                    is Map<*, *> -> org.json.JSONObject(payload)
+                    else -> null
+                }
+
+                if (obj == null) {
+                    Log.w("ControlFragment", "cpu.temp: unexpected payload type: ${payload?.javaClass?.name}")
+                    return@onSocketEvent
+                }
+
+                val cpu = obj.optJSONObject("cpu") ?: obj
+                val tRaw = cpu.optDouble("temp_c", Double.NaN)
+                latestCpuTempC = if (tRaw.isNaN()) null else tRaw
+                latestCpuTempIso = cpu.optString("ts_utc").takeIf { it.isNotBlank() }
+                lastCpuTempEventAt = System.currentTimeMillis()
+
+                if (!isAdded) return@onSocketEvent
+                runOnViewThread {
+                    renderTemperatureChip()
+                }
+            } catch (t: Throwable) {
+                Log.e("ControlFragment", "Handler for 'cpu.temp' failed", t)
             }
         }
     }
@@ -2068,12 +2486,26 @@ class ControlFragment : Fragment() {
         val tLbl = if (tempC == null) "Temp: —" else String.format(Locale.UK, "Temp: %.1f \u00B0C", tempC)
         val hLbl = if (rh == null)    "RH: —"   else String.format(Locale.UK, "RH: %.0f %%", rh)
 
-        binding.topTempChip.text = tLbl
+        renderTemperatureChip()
         binding.topHumChip.text  = hLbl
 
         // keep hidden legacy labels in sync
-        binding.envTempText.text     = tLbl
+        binding.envTempText.text     = envTempLabel(tempC)
         binding.envHumidityText.text = hLbl
+    }
+
+    private fun envTempLabel(tempC: Double?): String =
+        if (tempC == null) "Temp: —" else String.format(Locale.UK, "Temp: %.1f \u00B0C", tempC)
+
+    private fun cpuTempLabel(tempC: Double?): String =
+        if (tempC == null) "CPU: —" else String.format(Locale.UK, "CPU: %.1f \u00B0C", tempC)
+
+    private fun renderTemperatureChip() {
+        binding.topTempChip.text = if (showingCpuTemp) {
+            cpuTempLabel(latestCpuTempC)
+        } else {
+            envTempLabel(latestTempC)
+        }
     }
 
 
@@ -2082,11 +2514,11 @@ class ControlFragment : Fragment() {
         cancelPendingDisconnect()
         if (!isAdded) return
 
-        requireActivity().runOnUiThread {
-            val indexedAmsiFrame = amsiPreviewIndex(data) in 0..15
+        runOnViewThread {
+            val indexedAmsiFrame = amsiPreviewIndex(data) in 0 until deviceChannelCount
             if (indexedAmsiFrame && (amsiSocketPreviewEnabled || isCaptureOngoing || vm.isCapturing.value == true)) {
                 addAmsiGridBitmap(data, bmp)
-                return@runOnUiThread
+                return@runOnViewThread
             }
 
             when (mode) {
@@ -2119,7 +2551,14 @@ class ControlFragment : Fragment() {
         val pmfiSection = data.optString("pmfi_section", "")
 
         if (!isAdded) return
-        requireActivity().runOnUiThread {
+        runOnViewThread {
+            serverTransitionInProgress = data.optBoolean("transitioning", false)
+            if (modeTransitionInProgress) {
+                lastSw4FromServer = serverSw4
+                setUiBusy(true)
+                return@runOnViewThread
+            }
+
             // ---- 2) Heartbeat + cosmetic labels ----
             updateConnUi(true)
             if (lastBtn.isNotBlank()) {
@@ -2156,7 +2595,7 @@ class ControlFragment : Fragment() {
                     clearPreview()
                 }
                 startCaptureUi()
-                vm.capturedBitmaps.value = MutableList(16) { null }
+                vm.prepareCapture(deviceChannelCount)
                 vm.imageCount.value = 0
                 vm.isCapturing.value = true
             }
@@ -2172,7 +2611,7 @@ class ControlFragment : Fragment() {
                 setUiBusy(true)
                 ensurePreviewOffAsync(1500)
                 resetCalExpectedImages()
-                vm.startCalibration(totalChannels = 16)
+            vm.startCalibration(totalChannels = deviceChannelCount)
                 showCalUi(true)
             }
 
@@ -2195,7 +2634,7 @@ class ControlFragment : Fragment() {
                 if (sw4) ensurePreviewOffAsync(1500) // server still had preview on → ask it to stop
                 clearPreviewSwitchAndCanvas()
                 resetCalExpectedImages()
-                vm.startCalibration(totalChannels = 16)
+                vm.startCalibration(totalChannels = deviceChannelCount)
                 showCalUi(true)
             }
 
@@ -2243,7 +2682,7 @@ class ControlFragment : Fragment() {
 
             // ---- 6) Failsafe: if everything is idle, drop any lingering UI flags ----
             if (now() < calStartGraceUntil) {
-                return@runOnUiThread
+                return@runOnViewThread
             }
             if (!busyNow && !pmfiNow && !calNow) {
                 // Finish cal UI if it was showing
@@ -2251,7 +2690,7 @@ class ControlFragment : Fragment() {
                     endCalibrationUi(null)
                 }
                 // If AMSI flags were left on but uploads are done, unlock
-                if (isCaptureOngoing && (vm.imageCount.value ?: 0) >= 16) {
+                if (isCaptureOngoing && (vm.imageCount.value ?: 0) >= amsiCaptureTotal) {
                     isCaptureOngoing = false
                 }
             }
@@ -2307,15 +2746,217 @@ class ControlFragment : Fragment() {
         }
     }
 
+    private fun applyDeviceCapabilities(payload: JSONObject) {
+        capabilitiesReady = true
+        modeHandshakeVersion = ModeHandshake.updateVersion(
+            modeHandshakeVersion,
+            if (payload.has("mode_handshake_version") && !payload.isNull("mode_handshake_version"))
+                payload.optInt("mode_handshake_version", 0) else null
+        )
+        val count = payload.optInt("channel_count", 16).coerceAtLeast(1)
+        deviceChannelCount = count
+        val channelArray = payload.optJSONArray("channels")
+        val channelsByIndex = (0 until (channelArray?.length() ?: 0)).mapNotNull {
+            channelArray?.optJSONObject(it)
+        }.associateBy { it.optInt("index", -1) }
+        channelWavelengths = List(count) { index ->
+            channelsByIndex[index]?.optInt("wavelength_nm", 0)?.takeIf { it > 0 }
+        }
+
+        val preferences = requireContext().getSharedPreferences("device_capabilities", Context.MODE_PRIVATE)
+        val saved = preferences.getString("amsi_channels_${currentIp}_$deviceChannelCount", null)
+            ?.split(',')
+            ?.mapNotNull { it.toIntOrNull() }
+            ?.filter { it in 0 until count }
+            ?.toSet()
+            .orEmpty()
+        selectedAmsiChannels = saved.ifEmpty { (0 until count).toSet() }
+        ensureAmsiGridCapacity(count)
+        calTotalChannels = count
+        calExpectedImages = count
+        binding.buttonStartAmsi.contentDescription =
+            "Start AMSI; ${selectedAmsiChannels.size} of $count channels selected"
+        val model = payload.optString("device_model", "")
+        fanControlAvailable = payload.optBoolean("fan_control", false) ||
+            model.equals("MFI-3", ignoreCase = true) || count == 23
+        binding.switchFanOverride.visibility = if (fanControlAvailable) View.VISIBLE else View.GONE
+        if (!fanControlAvailable) renderFanState(false)
+        setUiBusy(isGlobalBusy())
+    }
+
+    private fun fetchDeviceCapabilities() {
+        if (currentIp.isBlank()) return
+        viewLifecycleOwner.lifecycleScope.launch {
+            runCatching { PiApi.api.capabilities() }.getOrNull()?.body()?.let { capabilities ->
+                val payload = JSONObject().apply {
+                    put("protocol_version", capabilities.protocol_version)
+                    put("mode_handshake_version", capabilities.mode_handshake_version)
+                    put("device_model", capabilities.device_model)
+                    put("channel_count", capabilities.channel_count)
+                    put("fan_control", capabilities.fan_control)
+                    put("channels", org.json.JSONArray().apply {
+                        capabilities.channels.forEach { channel ->
+                            put(JSONObject().apply {
+                                put("index", channel.index)
+                                put("wavelength_nm", channel.wavelength_nm ?: JSONObject.NULL)
+                            })
+                        }
+                    })
+                }
+                applyDeviceCapabilities(payload)
+            }
+            // Probe independently so an older/incomplete capabilities response
+            // cannot hide fan control on an MFI-3 server.
+            probeFanSupport()
+        }
+    }
+
+    private fun probeFanSupport() {
+        viewLifecycleOwner.lifecycleScope.launch {
+            val response = runCatching { PiApi.api.fanState() }.getOrNull()
+            val state = response?.takeIf { it.isSuccessful }?.body()
+            if (state?.available == true) {
+                fanControlAvailable = true
+                binding.switchFanOverride.visibility = View.VISIBLE
+                renderFanState(state.force_on)
+                setUiBusy(isGlobalBusy())
+            }
+        }
+    }
+
+    private fun refreshFanState() = probeFanSupport()
+
+    private fun renderFanState(forceOn: Boolean) {
+        binding.switchFanOverride.setOnCheckedChangeListener(null)
+        binding.switchFanOverride.isChecked = forceOn
+        binding.switchFanOverride.text = if (forceOn) "Fan: Maximum" else "Fan: Auto (always on)"
+        binding.switchFanOverride.setOnCheckedChangeListener { _, checked ->
+            if (fanControlAvailable && !fanRequestInFlight) setFanOverride(checked)
+        }
+    }
+
+    private fun setFanOverride(forceOn: Boolean) {
+        fanRequestInFlight = true
+        binding.switchFanOverride.isEnabled = false
+        viewLifecycleOwner.lifecycleScope.launch {
+            try {
+                val response = PiApi.api.setFanMode(FanControlBody(forceOn))
+                if (!response.isSuccessful) throw IOException(response.body()?.error ?: "HTTP ${response.code()}")
+                renderFanState(response.body()?.force_on ?: forceOn)
+            } catch (e: Exception) {
+                toast("Fan control failed: ${e.localizedMessage}")
+                refreshFanState()
+            } finally {
+                fanRequestInFlight = false
+                binding.switchFanOverride.isEnabled = fanControlAvailable && isPiConnected
+            }
+        }
+    }
+
+    private fun ensureAmsiGridCapacity(count: Int) {
+        binding.amsiPreviewGrid.removeAllViews()
+        gridImages.clear()
+        // Set capacity before adding tiles, including MFi-3's channels 16?22.
+        binding.amsiPreviewGrid.rowCount = (count + 3) / 4
+        binding.amsiPreviewGrid.columnCount = minOf(4, count)
+        repeat(count) { index ->
+            val image = ImageView(requireContext()).apply {
+                setBackgroundColor(Color.BLACK)
+                scaleType = ImageView.ScaleType.CENTER_CROP
+                setImageResource(android.R.drawable.ic_menu_gallery)
+                alpha = 0.45f
+            }
+            val label = TextView(requireContext()).apply {
+                text = channelWavelengths.getOrNull(index)?.let { "$it nm" } ?: "Ch ${index + 1}"
+                setTextColor(Color.WHITE)
+                textSize = 10f
+                gravity = Gravity.CENTER
+                setBackgroundColor(Color.argb(150, 0, 0, 0))
+                layoutParams = FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.WRAP_CONTENT,
+                    Gravity.BOTTOM
+                )
+            }
+            val tile = FrameLayout(requireContext()).apply {
+                setBackgroundColor(Color.BLACK)
+                addView(image, FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                ))
+                addView(label)
+                layoutParams = GridLayout.LayoutParams().apply {
+                    width = 0
+                    height = (74 * resources.displayMetrics.density).toInt()
+                    columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
+                    setMargins(4, 4, 4, 4)
+                }
+            }
+            binding.amsiPreviewGrid.addView(tile)
+            gridImages.add(image)
+        }
+        binding.amsiPreviewGrid.rowCount = (count + 3) / 4
+        binding.amsiPreviewGrid.columnCount = minOf(4, count)
+        binding.amsiGridProgressBar.max = count
+        binding.amsiGridTitleText.text = "AMSI Preview"
+        // Capabilities may be refreshed during a scan; retain received images.
+        if (mode == PreviewMode.AMSI_GRID || vm.capturedBitmaps.value.orEmpty().any { it != null }) {
+            updateGrid(vm.capturedBitmaps.value.orEmpty())
+        }
+    }
+
+    private fun showAmsiChannelDialog(onConfirmed: () -> Unit) {
+        val labels = Array(deviceChannelCount) { index ->
+            channelWavelengths.getOrNull(index)?.let { "Channel ${index + 1} ($it nm)" }
+                ?: "Channel ${index + 1}"
+        }
+        val checked = BooleanArray(deviceChannelCount) { it in selectedAmsiChannels }
+        AlertDialog.Builder(requireContext())
+            .setTitle("AMSI capture channels")
+            .setMultiChoiceItems(labels, checked) { _, which, enabled -> checked[which] = enabled }
+            .setNeutralButton("All") { _, _ ->
+                selectedAmsiChannels = (0 until deviceChannelCount).toSet()
+                saveAmsiChannelSelection()
+                onConfirmed()
+            }
+            .setPositiveButton("Save") { _, _ ->
+                val selected = checked.indices.filter { checked[it] }.toSet()
+                if (selected.isEmpty()) {
+                    toast("Select at least one channel")
+                    return@setPositiveButton
+                }
+                selectedAmsiChannels = selected
+                saveAmsiChannelSelection()
+                onConfirmed()
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    private fun saveAmsiChannelSelection() {
+        binding.buttonAmsiChannels.contentDescription =
+            "Choose AMSI channels; ${selectedAmsiChannels.size} of $deviceChannelCount selected"
+        requireContext().getSharedPreferences("device_capabilities", Context.MODE_PRIVATE)
+            .edit()
+            .putString("amsi_channels_${currentIp}_$deviceChannelCount", selectedAmsiChannels.sorted().joinToString(","))
+            .apply()
+    }
+
     // ===== Actions =====
     private fun triggerButton(buttonId: String) {
         if (currentIp.isEmpty()) { toast("Set IP address first"); return }
         viewLifecycleOwner.lifecycleScope.launch {
             try {
-                val resp = PiApi.api.triggerButton(buttonId)
-                if (!resp.isSuccessful) toast("Trigger $buttonId failed: ${resp.code()}")
+                when (buttonId) {
+                    "SW4" -> ensurePreviewSet(false)
+                    "SW3" -> performModeTransition("calibration")
+                    "SW2" -> performModeTransition("amsi", channels = selectedAmsiChannels.sorted())
+                    else -> error("Unknown acquisition mode")
+                }
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                toast("Network error: ${e.localizedMessage}")
+                toast("Mode change failed: ${e.localizedMessage}")
             }
         }
     }
@@ -2367,55 +3008,19 @@ class ControlFragment : Fragment() {
     }
 
     private fun startPmfi(iniText: String) {
-        // We generate a stable-ish session_id so uploads can tag the run.
         val sessionId = UUID.randomUUID().toString()
-
-        // IMPORTANT:
-        // We are NOW sending ini_text (raw multiline INI) as JSON.
-        // We are NOT sending ini_b64 anymore because the Pi parser may choke on it
-        // for long/complex INIs and respond "ini_b64 decode failed".
-        //
-        // This matches the Pi route logic:
-        //   if ini_text: parse directly
-        //   elif ini_b64: base64-decode & parse
-        //
-        // Sending ini_text avoids the decode path entirely.
-        val body = PmfiStartBody(
-            ini_text = iniText,
-            session_id = sessionId,
-            upload_mode = "zip" // Pi ignores this right now but it's fine to include
-        )
-
         viewLifecycleOwner.lifecycleScope.launch {
             try {
-                val resp = PiApi.api.pmfiStart(body)
-
-                if (resp.isSuccessful) {
-                    // We assume success structure like:
-                    // { "ok": true, "session_id": "...", "config_id": "...", "plan": {...} }
-                    isPmfiRunning = true
-                    setUiBusy(true)
-
-                    binding.pmfiStartBtn.text = "PMFI running…"
-                    binding.pmfiStageLabel.text = "PMFI started… (sessionId=$sessionId)"
-
-                    // Reset/enable PMFI progress UI immediately so the bars are visible
-                    resetPmfiUi(hide = false)
-                    showPmfiUi()
-
-                } else {
-                    val errBody = resp.errorBody()?.string().orEmpty()
-                    toast("PMFI start failed: ${resp.code()} $errBody")
-
-                    // Rollback
-                    isPmfiRunning = false
-                    setUiBusy(false)
-                    setPmfiButtonBusy(false)
-                    binding.pmfiStartBtn.text = "Start PMFI"
-                }
+                resetPmfiUi(hide = false)
+                showPmfiUi()
+                performModeTransition("pmfi", iniText = iniText, sessionId = sessionId)
+                isPmfiRunning = true
+                setUiBusy(true)
+                binding.pmfiStartBtn.text = "PMFI running?"
+            } catch (e: CancellationException) {
+                throw e
             } catch (e: Exception) {
-                toast("Network error: ${e.localizedMessage}")
-
+                toast("PMFI could not start: ${e.localizedMessage}")
                 isPmfiRunning = false
                 setUiBusy(false)
                 setPmfiButtonBusy(false)
@@ -2423,8 +3028,6 @@ class ControlFragment : Fragment() {
             }
         }
     }
-
-
 
     private fun sendShutdown() {
         viewLifecycleOwner.lifecycleScope.launch {
@@ -2462,11 +3065,12 @@ class ControlFragment : Fragment() {
     private fun showCalUi(show: Boolean) {
         if (show) {
             refreshCalExpectedImages()
-            binding.calProgressBar.progress = 0
+            binding.calProgressBar.setDeterminateProgress(0, calExpectedImages)
             binding.calProgressBar.visibility = View.VISIBLE
             binding.calProgressText.visibility = View.VISIBLE
             updateCalProgressText()
         } else {
+            if (binding.calProgressBar.isIndeterminate) binding.calProgressBar.isIndeterminate = false
             binding.calProgressBar.progress = 0
             binding.calProgressBar.visibility = View.GONE
             binding.calProgressText.text = ""
@@ -2478,29 +3082,49 @@ class ControlFragment : Fragment() {
         calDarkFrameSeen = false
         calExtraImagesExpected = 0
         calDarkImagesUploaded = 0
+        calUploadedImages = 0
+        calUploadTotalImages = deviceChannelCount
         calInfoLine = ""
         calStageLine = ""
         calTotalChannels = vm.calTotalChannels.value ?: 16
-        calExpectedImages = 16
+        calExpectedImages = deviceChannelCount
         refreshCalExpectedImages()
     }
 
     private fun refreshCalExpectedImages() {
         val totalChannels = vm.calTotalChannels.value ?: calTotalChannels
         calExpectedImages = totalChannels.coerceAtLeast(1)
+        if (binding.calProgressBar.isIndeterminate) binding.calProgressBar.isIndeterminate = false
         binding.calProgressBar.max = calExpectedImages
         if (binding.calProgressBar.progress > calExpectedImages) {
             binding.calProgressBar.progress = calExpectedImages
         }
     }
 
-    private fun updateCalProgressText() {
+    private fun updateCalProgressText(serverPercent: Int? = null) {
         val done = binding.calProgressBar.progress
         val total = binding.calProgressBar.max
+        if (calStageLine.equals("Uploading calibration images", ignoreCase = true)) {
+            binding.calProgressText.text = "Uploading calibration images..."
+            return
+        }
+        if (calStageLine.equals("Packing calibration ZIP", ignoreCase = true) ||
+            calStageLine.equals("Uploading calibration ZIP", ignoreCase = true) ||
+            calStageLine.equals("Uploading calibration metadata", ignoreCase = true)
+        ) {
+            binding.calProgressText.text = "$calStageLine..."
+            return
+        }
+        if (
+            calStageLine.equals("Calibration ZIP uploaded", ignoreCase = true) ||
+            calStageLine.equals("Calibration ZIP upload failed", ignoreCase = true)
+        ) {
+            binding.calProgressText.text = "$calStageLine: $done/$total (${percentText(done, total, serverPercent)})"
+            return
+        }
         val stage = if (calStageLine.isNotBlank()) " - $calStageLine" else ""
-        val showInfo = calStageLine.isBlank()
-        val info = if (showInfo && calInfoLine.isNotBlank()) " - $calInfoLine" else ""
-        binding.calProgressText.text = "Calibration: $done/$total$stage$info"
+        val info = if (calInfoLine.isNotBlank()) " - $calInfoLine" else ""
+        binding.calProgressText.text = "Calibration: $done/$total (${percentText(done, total, serverPercent)})$stage$info"
     }
     // SUSPEND: turn preview off on the Pi and locally, wait briefly for ack.
     private suspend fun ensurePreviewOff(timeoutMs: Long = 2_000L) {
@@ -2510,6 +3134,7 @@ class ControlFragment : Fragment() {
 
     // NON-SUSPEND wrapper: call from non-suspend contexts (e.g. socket callback)
     private fun ensurePreviewOffAsync(timeoutMs: Long = 2_000L) {
+        if (modeTransitionInProgress || serverTransitionInProgress) return
         viewLifecycleOwner.lifecycleScope.launch { ensurePreviewOff(timeoutMs) }
     }
 
@@ -2565,11 +3190,16 @@ class ControlFragment : Fragment() {
         // If it's disabled while checked, leave it checked visually but grey it out.
         binding.switchCameraPreview.alpha = if (canTogglePreview) 1f else 0.4f
 
-        // --- AMSI Socket.IO 4x4 preview switch ---
+        // --- AMSI Socket.IO image grid switch ---
         // This controls whether the Pi emits per-channel preview images during AMSI.
         val canToggleAmsiSocketPreview = connected && !globalBusy && !amsiSocketPreviewToggleInFlight
         binding.switchAmsiSocketPreview.isEnabled = canToggleAmsiSocketPreview
         binding.switchAmsiSocketPreview.alpha = if (canToggleAmsiSocketPreview) 1f else 0.4f
+
+        binding.buttonDiagnostics.isEnabled = connected && !globalBusy
+        binding.buttonAmsiChannels.isEnabled = connected && capabilitiesReady && !globalBusy
+        binding.switchFanOverride.isEnabled = fanControlAvailable && connected && !fanRequestInFlight
+        binding.switchFanOverride.alpha = if (binding.switchFanOverride.isEnabled) 1f else 0.4f
 
         // --- AMSI capture button (SW2 trigger) ---
         // Only if connected AND idle.

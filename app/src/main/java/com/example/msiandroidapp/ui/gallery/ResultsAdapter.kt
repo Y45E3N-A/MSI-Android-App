@@ -229,17 +229,21 @@ class ResultsAdapter(
         private val grid: GridLayout = view.findViewById(R.id.in_progress_grid)
 
         fun bind(item: ResultListItem.InProgress) {
-            progressText.text = "Receiving images: ${item.imageCount}/16"
-            progressBar.max = 16
+            val channelCount = item.bitmaps.size.coerceAtLeast(1)
+            progressText.text = "Receiving images: ${item.imageCount}/$channelCount"
+            progressBar.max = channelCount
             progressBar.progress = item.imageCount
 
             // Simple grid preview (placeholder + any bitmaps provided)
             grid.removeAllViews()
-            for (i in 0 until 16) {
+            grid.columnCount = minOf(4, channelCount)
+            grid.rowCount = (channelCount + 3) / 4
+            for (i in item.bitmaps.indices) {
                 val iv = ImageView(itemView.context).apply {
                     layoutParams = GridLayout.LayoutParams().apply {
-                        width = 160
-                        height = 160
+                        width = 0
+                        height = (74 * itemView.resources.displayMetrics.density).toInt()
+                        columnSpec = GridLayout.spec(GridLayout.UNDEFINED, 1f)
                         setMargins(4, 4, 4, 4)
                     }
                     scaleType = ImageView.ScaleType.CENTER_CROP

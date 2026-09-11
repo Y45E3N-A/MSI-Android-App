@@ -33,6 +33,11 @@
             android:foregroundServiceType="dataSync" />
 
         <activity
+            android:name=".ui.diagnostics.DiagnosticsActivity"
+            android:exported="false"
+            android:windowSoftInputMode="adjustResize" />
+
+        <activity
             android:name=".ui.gallery.SessionDetailActivity"
             android:exported="false" />
         <activity

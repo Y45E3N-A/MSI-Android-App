@@ -1,5 +1,7 @@
 package com.example.msiandroidapp.service
 
+import org.json.JSONObject
+
 import android.content.Context
 import android.util.Log
 import com.example.msiandroidapp.data.AppDatabase
@@ -37,7 +39,7 @@ import java.util.zip.ZipFile
  *          [&section=sectionName]    -> accepts AMSI (PNG/DNG stream) or PMFI ZIP/PNG
  *
  * Modes:
- *  - AMSI (default): expects 16 image uploads per sessionId. Auto-finalises at 16.
+ *  - AMSI (default): accepts the device-reported image count for each capture.
  *  - PMFI ZIP (preferred): a ZIP for a single section/wavelength block (&mode=pmfi).
  *    We unzip the PNGs, merge them into that section’s row in Room
  *    (1 DB row per (runId, sectionIndex)), and broadcast progress.
@@ -83,7 +85,10 @@ class UploadServer(
     // (kept for future use; not used to finalise implicitly)
     private val RUN_IDLE_SWEEP_MS = 30_000L
 
-    private val IMAGES_PER_AMSI = 16
+    private val CAL_WAVELENGTHS = intArrayOf(
+        395, 415, 450, 470, 505, 528, 555, 570,
+        590, 610, 625, 640, 660, 730, 850, 880
+    )
     private val SESSION_TIMEOUT_MS = 10 * 60 * 1000L     // clear trackers after 10 min idle
     private val LOCATION_TIMEOUT_MS = 5_000L             // location best-effort
     private val ZIP_SIGNATURES = arrayOf(
@@ -167,6 +172,16 @@ class UploadServer(
     // POST /upload
     // --------------------------------------------------------------------------------------------
     private fun handlePost(session: IHTTPSession): Response {
+        if (session.uri == "/diagnostics/echo") {
+            val body = HashMap<String, String>()
+            session.parseBody(body)
+            val nonce = JSONObject(body["postData"] ?: "{}").optString("nonce")
+            if (!nonce.matches(Regex("[a-f0-9]{32}"))) {
+                return newFixedLengthResponse(Response.Status.BAD_REQUEST, MIME_PLAINTEXT, "Invalid nonce")
+            }
+            return newFixedLengthResponse(Response.Status.OK, "application/json", JSONObject().put("nonce", nonce).toString())
+        }
+
         return try {
             // Parse body to a temp file path
             val files = HashMap<String, String>()
@@ -242,6 +257,14 @@ class UploadServer(
             }
 
             // ── 3) PMFI PNG stream (optional) ─────────────────────────────────────────────────────
+            if (mode == "cal" && looksLikeZip(fileNameHint, contentType, tmpFile)) {
+                return handleCalZip(
+                    calRunId = (params["runId"] ?: sessionId),
+                    zipFilename = fileNameHint,
+                    tmpFile = tmpFile
+                )
+            }
+
             if (mode == "pmfi") {
                 val uploadsRoot = File(context.filesDir, "uploads").apply { mkdirs() }
                 val effectiveRunId = (params["runId"] ?: sessionId)
@@ -328,6 +351,76 @@ class UploadServer(
                 "error: ${e.message}"
             )
         }
+    }
+
+    private fun handleCalZip(
+        calRunId: String,
+        zipFilename: String,
+        tmpFile: File
+    ): Response {
+        val calRoot = File(sessionsRoot, "CAL").apply { mkdirs() }
+        val calDir = File(calRoot, calRunId).apply { mkdirs() }
+        val savedZip = File(calDir, zipFilename.ifBlank { "${calRunId}_calibration.zip" })
+
+        val zipWavelengths = runCatching {
+            ZipFile(tmpFile).use { zip ->
+                val metadata = zip.entries().asSequence()
+                    .firstOrNull { !it.isDirectory && it.name.endsWith("_metadata.json", true) }
+                    ?: return@use emptyList<Int>()
+                val metadataText = zip.getInputStream(metadata).bufferedReader().use { it.readText() }
+                val root = org.json.JSONObject(metadataText)
+                // The ZIP is sufficient to restore results even if the separate
+                // metadata upload fails. This also saves the JSON for photo overlays.
+                val metadataFile = File.createTempFile("cal_metadata_", ".json", calDir)
+                metadataFile.writeText(metadataText)
+                handleEnvMetadataJson(calRunId, metadataFile)
+                val values = root.optJSONArray("wavelengths") ?: return@use emptyList<Int>()
+                List(values.length()) { values.optInt(it, 0) }
+            }
+        }.getOrDefault(emptyList())
+
+        try {
+            Log.i(TAG, "CAL ZIP: saving -> ${savedZip.absolutePath}")
+            tmpFile.copyTo(savedZip, overwrite = true)
+        } finally {
+            tmpFile.delete()
+        }
+
+        val extractedPngs = unzipPngs(savedZip, calDir)
+        runCatching {
+            if (savedZip.exists() && !savedZip.delete()) {
+                Log.w(TAG, "CAL ZIP delete failed after extraction: ${savedZip.absolutePath}")
+            }
+        }.onFailure { e ->
+            Log.w(TAG, "CAL ZIP delete error after extraction: ${e.message}")
+        }
+
+        if (extractedPngs.isEmpty()) {
+            Log.w(TAG, "CAL ZIP contained no PNG files: ${savedZip.absolutePath}")
+            return badRequest("CAL ZIP contained no PNG files")
+        }
+
+        val sortedPngs = orderedImagePaths(extractedPngs)
+        sortedPngs.forEach { path ->
+            val name = File(path).name
+            val isDark = name.contains("dark", ignoreCase = true)
+            val channelIdx = imageSequenceIndex(path).takeIf { it >= 0 } ?: -1
+            val wavelengthNm = if (!isDark && channelIdx >= 0) {
+                zipWavelengths.getOrNull(channelIdx)?.takeIf { it > 0 }?.toString()
+                    ?: CAL_WAVELENGTHS.getOrNull(channelIdx)?.toString().orEmpty()
+            } else {
+                ""
+            }
+            upsertCalibrationProfileImages(
+                calRunId = calRunId,
+                imagePath = path,
+                channelIdx = channelIdx,
+                wavelengthNm = wavelengthNm
+            )
+        }
+
+        cleanupStaleSessions()
+        return ok("CAL ZIP accepted (${sortedPngs.size} images): $zipFilename")
     }
 
     private fun handleCalPng(
@@ -554,13 +647,15 @@ class UploadServer(
             return badRequest("AMSI ZIP contained no PNG files")
         }
 
-        val sortedPngs = extractedPngs.sortedBy { File(it).name.lowercase(Locale.ROOT) }
+        val sortedPngs = orderedImagePaths(extractedPngs)
         UploadProgressBus.amsiZipBytes.postValue(sessionId to zipBytes)
         UploadProgressBus.uploadProgress.postValue(sessionId to sortedPngs.size)
         lastSeenAt[sessionId] = System.currentTimeMillis()
         finalisedKeys.add(sessionId)
 
-        if (sortedPngs.size == IMAGES_PER_AMSI) {
+        val expectedImages = (lastRequestParams.get() ?: emptyMap())["frames"]
+            ?.toIntOrNull()?.coerceAtLeast(1) ?: sortedPngs.size
+        if (sortedPngs.size == expectedImages) {
             insertSessionAsync(
                 key = sessionId,
                 imagePaths = sortedPngs,
@@ -572,7 +667,7 @@ class UploadServer(
             amsiUploads.remove(sessionId)
             lastSeenAt.remove(sessionId)
         } else {
-            Log.w(TAG, "AMSI ZIP extracted ${sortedPngs.size}/$IMAGES_PER_AMSI PNGs for session=$sessionId")
+            Log.w(TAG, "AMSI ZIP extracted ${sortedPngs.size}/$expectedImages PNGs for session=$sessionId")
         }
 
         cleanupStaleSessions()
@@ -727,12 +822,12 @@ class UploadServer(
         UploadProgressBus.uploadProgress.postValue(sessionId to list.size)
         Log.i(TAG, "PNG saved: '$filename' (session=$sessionId, count=${list.size}, pmfi=$isPmfi)")
 
-        // ONLY finalize AMSI bursts (16-frame captures)
-        if (!isPmfi && list.size == IMAGES_PER_AMSI && finalisedKeys.add(sessionId)) {
+        val expectedImages = (lastRequestParams.get() ?: emptyMap())["frames"]?.toIntOrNull()
+        if (!isPmfi && expectedImages != null && list.size == expectedImages && finalisedKeys.add(sessionId)) {
             val completedAt = System.currentTimeMillis()
             insertSessionAsync(
                 key = sessionId,
-                imagePaths = list.toList(),
+                imagePaths = orderedImagePaths(list.toList()),
                 type = "AMSI",
                 label = null,
                 completedAtMillis = completedAt,
@@ -773,6 +868,30 @@ class UploadServer(
         } else {
             raw
         }
+    }
+
+    private fun imageSequenceIndex(path: String): Int {
+        val name = File(path).nameWithoutExtension
+        Regex("(?:image|CAL_image|CAL_dark)_(\\d+)", RegexOption.IGNORE_CASE)
+            .find(name)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+            ?.let { return it }
+        Regex("(\\d+)")
+            .find(name)
+            ?.groupValues
+            ?.getOrNull(1)
+            ?.toIntOrNull()
+            ?.let { return it }
+        return Int.MAX_VALUE
+    }
+
+    private fun orderedImagePaths(paths: List<String>): List<String> {
+        return paths.sortedWith(
+            compareBy<String> { imageSequenceIndex(it) }
+                .thenBy { File(it).name.lowercase(Locale.ROOT) }
+        )
     }
 
     private fun persistUploadedImage(tmpFile: File, target: File, imageSpec: UploadImageSpec) {
@@ -851,7 +970,7 @@ class UploadServer(
                 out.add(target.absolutePath)
             }
         }
-        return out.sorted()
+        return orderedImagePaths(out)
     }
 
     private fun cleanupStaleSessions() {
